@@ -1,0 +1,44 @@
+{
+  "family": "agent-os",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": ["FARGATE"],
+  "cpu": "2048",
+  "memory": "4096",
+  "runtimePlatform": {
+    "cpuArchitecture": "X86_64",
+    "operatingSystemFamily": "LINUX"
+  },
+  "executionRoleArn": "__EXECUTION_ROLE_ARN__",
+  "containerDefinitions": [
+    {
+      "name": "Main",
+      "image": "__IMAGE__",
+      "essential": true,
+      "portMappings": [
+        { "name": "main", "containerPort": 8000, "protocol": "tcp" }
+      ],
+      "environment": [
+        { "name": "DB_HOST", "value": "__DB_HOST__" },
+        { "name": "DB_PORT", "value": "5432" },
+        { "name": "DB_USER", "value": "ai" },
+        { "name": "DB_DATABASE", "value": "ai" },
+        { "name": "DB_DRIVER", "value": "postgresql+psycopg" },
+        { "name": "WAIT_FOR_DB", "value": "True" },
+        { "name": "AGENTOS_URL", "value": "__AGENTOS_URL__" }__EXTRA_ENV__
+      ],
+      "secrets": [
+        { "name": "OPENAI_API_KEY", "valueFrom": "__OPENAI_SECRET_ARN__" },
+        { "name": "DB_PASS", "valueFrom": "__DB_PASS_SECRET_ARN__" }__EXTRA_SECRETS__
+      ],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/agent-os",
+          "awslogs-region": "__REGION__",
+          "awslogs-create-group": "true",
+          "awslogs-stream-prefix": "agent-os"
+        }
+      }
+    }
+  ]
+}

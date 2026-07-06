@@ -1,10 +1,10 @@
-# AgentOS — Railway template
+# AgentOS — AWS template
 
 This file is the source of truth for any agent (Claude Code, Codex, others) working in this repo. `CLAUDE.md` is a symlink to this file — edit one, both update.
 
 ## Project Overview
 
-**AgentOS — the agent backend for every frontend.** An agent server built on [Agno](https://docs.agno.com) that attaches to any client: **REST** for programmatic use, **chat interfaces** for humans (Slack is wired in; WhatsApp/Telegram/Discord mirror the same pattern), and **MCP** at `/mcp` for AI apps (claude.ai, ChatGPT, Cursor, Claude Code) — which work *through* the platform, not just on it. The repo itself is designed for coding agents to build and extend. Two flagship agents — Agent Builder (creates agents, teams, and workflows) and Platform Manager (understands, monitors, and explains the platform) — plus WebSearch as the simplest sample agent to copy. Postgres (pgvector) handles persistence for sessions, memory, and knowledge. Runs locally via Docker; this template deploys to Railway with a single script and is the reference sibling of the `agentos-*` deployment family — see [Portable core vs. deploy layer](#portable-core-vs-deploy-layer).
+**AgentOS — the agent backend for every frontend.** An agent server built on [Agno](https://docs.agno.com) that attaches to any client: **REST** for programmatic use, **chat interfaces** for humans (Slack is wired in; WhatsApp/Telegram/Discord mirror the same pattern), and **MCP** at `/mcp` for AI apps (claude.ai, ChatGPT, Cursor, Claude Code) — which work *through* the platform, not just on it. The repo itself is designed for coding agents to build and extend. Two flagship agents — Agent Builder (creates agents, teams, and workflows) and Platform Manager (understands, monitors, and explains the platform) — plus WebSearch as the simplest sample agent to copy. Postgres (pgvector) handles persistence for sessions, memory, and knowledge. Runs locally via Docker; this template deploys to AWS (ECS Express Mode + RDS) with a single script and is the AWS sibling of the `agentos-*` deployment family — see [Portable core vs. deploy layer](#portable-core-vs-deploy-layer).
 
 ## Architecture
 
@@ -47,7 +47,8 @@ Shared:
 | [`.agents/skills/`](.agents/skills/) | Dev-time **coding-agent workflows** (`create-new-agent`, `extend-agent`, `improve-agent`, `eval-and-improve`, `review-and-improve`) — slash commands coding agents run *on this repo*. `.claude/skills` is a committed symlink into it — see [Working with coding agents](#working-with-coding-agents). |
 | [`README.md`](README.md) | Public entry point — leads with the copy-paste setup prompt that takes a coding agent from clone to connected. |
 | [`compose.yaml`](compose.yaml) | Docker Compose for local development. |
-| [`railway.json`](railway.json) | Railway deploy config (Docker + 1 replica + 4Gi/2vCPU). |
+| [`scripts/aws/`](scripts/aws/) | AWS deploy layer — `up.sh` provisions ECR + RDS Postgres 17 (private) + Secrets Manager + an ECS Express Mode service; `env-sync`/`redeploy`/`down` manage the lifecycle. |
+| [`scripts/aws/task-def.json`](scripts/aws/task-def.json) | Custom Express task definition — container `Main`, port 8000, 2 vCPU/4 GB, Secrets Manager injection; rendered by the scripts. |
 
 ## Development Setup
 
@@ -187,10 +188,10 @@ Invoke a skill by name (`/extend-agent`) or just describe the task — Claude Co
 | Variable | Required | Default | Description |
 |---|---|---|---|
 | `OPENAI_API_KEY` | yes | — | OpenAI key for models + embeddings. |
-| `RUNTIME_ENV` | no | `prd` | `dev` disables JWT. Compose sets this to `dev` for local — never put it in an env file that syncs to Railway, or production deploys unauthenticated. |
+| `RUNTIME_ENV` | no | `prd` | `dev` disables JWT. Compose sets this to `dev` for local — never put `dev` in an env file that `env-sync.sh` pushes to the task definition, or production serves unauthenticated. |
 | `JWT_VERIFICATION_KEY` | prd | — | Public key from os.agno.com. Required when `RUNTIME_ENV=prd` and `authorization=True`, unless `JWT_JWKS_FILE` is set. |
 | `JWT_JWKS_FILE` | prd | — | Path to a JWKS file; alternative to `JWT_VERIFICATION_KEY` for production JWT verification. |
-| `AGENTOS_URL` | no | `http://127.0.0.1:8000` | Scheduler base URL — cron triggers reach AgentOS over this. `scripts/railway/up.sh` auto-sets it to the created Railway domain (and writes it back into your env file); only set it by hand for custom domains or tunnels. Left at the localhost default in prod, scheduled jobs silently never fire. |
+| `AGENTOS_URL` | no | `http://127.0.0.1:8000` | Scheduler base URL — cron triggers reach AgentOS over this. `scripts/aws/up.sh` sets it to the Express service URL (`https://agent-os.ecs.<region>.on.aws` — predictable, so it's baked in before the first deploy and corrected automatically if reality differs) and writes it back into your env file. Left at the localhost default in prod, scheduled jobs silently never fire. |
 | `ENABLE_DEPLOY_CHECK` | no | `True` | The reference deployment-check cron (`app/schedules.py`) runs daily by default. Set `False` to disable; the workflow stays runnable on demand regardless. |
 | `ENABLE_SCHEDULED_EVALS` | no | `False` | If `True`, schedules the run-evals workflow daily. Off by default because it uses model calls. |
 | `EVALS_TAG` | no | `smoke` | Eval tag run by the run-evals workflow. |
@@ -245,29 +246,31 @@ For Discord, Telegram, WhatsApp, and custom UIs, mirror the Slack conditional pa
 
 ## Portable core vs. deploy layer
 
-This repo is the Railway sibling of the `agentos-*` deployment family (agentos-docker, agentos-aws, agentos-fly, agentos-gcp, agentos-azure, agentos-modal). Everything that defines the platform is **portable core — identical across the family**: `agents/`, `app/`, `db/`, `workflows/`, `evals/`, the MCP server wiring, the interfaces, and the coding-agent skills in `.agents/skills/`. `Dockerfile`, `compose.yaml`, and `scripts/entrypoint.sh` are shared local-dev/runtime infra, also not deployment-specific.
+This repo is the AWS sibling of the `agentos-*` deployment family ([agentos-railway](https://github.com/agno-agi/agentos-railway) is the reference; agentos-docker is the self-hosted sibling; agentos-fly, agentos-gcp, agentos-azure, agentos-modal cover the other clouds). Everything that defines the platform is **portable core — identical across the family**: `agents/`, `app/`, `db/`, `workflows/`, `evals/`, the MCP server wiring, the interfaces, and the coding-agent skills in `.agents/skills/`. `Dockerfile`, `compose.yaml`, and `scripts/entrypoint.sh` are shared local-dev/runtime infra, also not deployment-specific.
 
-The **Railway-specific deploy layer** — what a sibling template swaps out — is exactly:
+The **AWS-specific deploy layer** — what a sibling template swaps out — is exactly:
 
-- [`railway.json`](railway.json)
-- [`scripts/railway/`](scripts/railway/) (`up.sh`, `env-sync.sh`, `redeploy.sh`)
-- the "Deploying to Railway" prose here and in the README
+- [`scripts/aws/`](scripts/aws/) (`up.sh`, `env-sync.sh`, `redeploy.sh`, `down.sh`, `task-def.json`)
+- the "Deploying to AWS" prose here and in the README
 
-When editing, keep that boundary crisp: platform behavior belongs in the core, Railway mechanics belong in the deploy layer, and nothing in the core should import from or depend on it.
+When editing, keep that boundary crisp: platform behavior belongs in the core, AWS mechanics belong in the deploy layer, and nothing in the core should import from or depend on it.
 
-## Deploying to Railway
+## Deploying to AWS (ECS Express Mode)
 
 ```bash
-./scripts/railway/up.sh        # provision Postgres + agent-os service
-./scripts/railway/env-sync.sh  # sync .env.production (default) or .env
-./scripts/railway/redeploy.sh  # redeploy after code changes
+./scripts/aws/up.sh        # provision ECR + RDS + Secrets Manager + the Express service
+./scripts/aws/env-sync.sh  # sync .env.production (default) or a named env file
+./scripts/aws/redeploy.sh  # rebuild + push the image, roll the service
+./scripts/aws/down.sh      # tear everything down (asks for confirmation)
 ```
 
-`up.sh` creates the domain before deploying and sets `AGENTOS_URL` to it (on Railway and in your env file), so the scheduler is reachable in prod out of the box.
+The heavy lifting is **ECS Express Mode**: one `aws ecs create-express-gateway-service` call provisions the Fargate service, ALB + HTTPS certificate, target groups, security groups, autoscaling, CloudWatch logs and alarms, and a public URL of the form `https://<service-name>.ecs.<region>.on.aws` — up to 25 Express services share one ALB. `up.sh` pins the scaling target to exactly **one task** (min 1 keeps the in-process scheduler alive; max 1 because scaled-out replicas would each run a scheduler, double-firing every cron — the same reason the Fly sibling deploys `--ha=false`). If you ever want scale-out, make the scheduler single-instance first. Because the URL is predictable (`https://agent-os.ecs.<region>.on.aws`), `up.sh` bakes `AGENTOS_URL` into the task definition before the first deploy and rolls a correcting revision only if reality differs, so the scheduler is reachable in prod out of the box. Region comes from `AWS_REGION` (default `us-east-1`).
 
-JWT auth is on by default. After creating the Railway domain, `up.sh` pauses if `JWT_VERIFICATION_KEY` or `JWT_JWKS_FILE` is missing, so you can connect the OS at os.agno.com (Connect OS → Live, name it `Live AgentOS`, then Settings → OS & Security → Token-Based Authorization (JWT)), paste the full PEM into the prompt, and let the script save it to the env file. Live AgentOS Connections are a paid feature; use `PLATFORM30` to get 1 month off. The script re-reads the env file and pushes the key before the first deploy. If you skip the prompt or run non-interactively, add the key later and run `./scripts/railway/env-sync.sh`.
+We ship a custom task definition ([`scripts/aws/task-def.json`](scripts/aws/task-def.json)): container named `Main`, port mapping named `main` on 8000, 2 vCPU / 4 GB (Express's own default would be 1 vCPU / 2 GB), and Secrets Manager injection for every secret-shaped variable — so sizing and secret handling stay ours while Express owns the infrastructure. Around it, `up.sh` provisions the ECR repo and RDS PostgreSQL 17 (db.t4g.micro, private-only — no public address, port 5432 open only inside the VPC); pgvector comes from the app's own `CREATE EXTENSION IF NOT EXISTS` on first boot. The ALB health check hits `/health`, which AgentOS serves unauthenticated by design even in prd, so health checks pass with JWT auth on.
 
-The Railway *project* is `agentos-railway`; the app *service* is `agent-os`.
+JWT auth is on by default. Once the service URL exists, `up.sh` pauses if `JWT_VERIFICATION_KEY` or `JWT_JWKS_FILE` is missing, so you can connect the OS at os.agno.com (Connect OS → Live with the service URL, name it `Live AgentOS`, then Settings → OS & Security → Token-Based Authorization (JWT)), paste the full PEM into the prompt, and let the script save it to the env file. Live AgentOS Connections are a paid feature; use `PLATFORM30` to get 1 month off. The PEM lands in Secrets Manager and rides into a fresh task-definition revision before traffic is served. If you skip the prompt or run non-interactively, add the key later and run `./scripts/aws/env-sync.sh`.
+
+`up.sh` needs an AWS CLI v2 recent enough to have the Express Mode verbs — it preflights `aws ecs create-express-gateway-service help` and tells you to upgrade (e.g. `brew upgrade awscli`) until that works. This deploy layer fully replaces the old agno-infra approach: no `infra/` directory, no `ag infra up/down` — plain `aws` CLI scripts a coding agent can read, run, and fix mid-failure. Teams that prefer real IaC can drive Express Mode from CloudFormation or Terraform instead.
 
 ## Common Tasks
 
@@ -286,8 +289,8 @@ docker compose up -d --build
 # Build a multi-arch image (maintainer-only)
 ./scripts/build_image.sh
 
-# Tail Railway logs
-railway logs --service agent-os
+# Tail service logs
+aws logs tail /ecs/agent-os --follow
 ```
 
 ## Documentation Links
