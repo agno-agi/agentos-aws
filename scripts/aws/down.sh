@@ -78,24 +78,41 @@ fi
 if [[ -n "$SERVICE_ARN" ]]; then
     echo ""
     echo -e "${BOLD}Deleting Express service (removes ALB wiring, SGs, autoscaling)...${NC}"
-    aws ecs delete-express-gateway-service --region "$REGION" \
-        --service-arn "$SERVICE_ARN" > /dev/null \
-        || echo -e "${DIM}Service already gone or delete failed — verify below${NC}"
-    echo -e "${DIM}Waiting for the service to drain...${NC}"
+    # Capture stderr: on a retry after a timed-out earlier run, the service is
+    # already gone and delete fails with "Resource not found" — skip the drain
+    # wait entirely then. (A deleted service can stay *describable* as
+    # DRAINING long after it left list-services, so polling would spin.)
     STATUS="ACTIVE"
-    for _ in $(seq 1 60); do
-        STATUS="$(aws ecs describe-express-gateway-service --region "$REGION" \
-            --service-arn "$SERVICE_ARN" \
-            --query 'service.status.statusCode' --output text 2> /dev/null || echo GONE)"
-        # Terminal states: describe fails once the service is fully removed
-        # (GONE), and INACTIVE is the API's deleted state.
-        [[ "$STATUS" == "GONE" || "$STATUS" == "None" || "$STATUS" == "INACTIVE" ]] && break
-        sleep 10
-    done
+    if ! DELETE_ERR="$(aws ecs delete-express-gateway-service --region "$REGION" \
+        --service-arn "$SERVICE_ARN" 2>&1 > /dev/null)"; then
+        if grep -qi 'not found' <<< "$DELETE_ERR"; then
+            echo -e "${DIM}Service already gone.${NC}"
+            STATUS="GONE"
+        else
+            echo -e "${DIM}${DELETE_ERR}${NC}"
+            echo -e "${DIM}Delete failed — verify below${NC}"
+        fi
+    fi
+    if [[ "$STATUS" != "GONE" ]]; then
+        echo -e "${DIM}Waiting for the service to drain...${NC}"
+        # 20 min bound: a fully provisioned service has drained in >10 min
+        # live (the delete also unwinds the Express gateway ALB wiring).
+        for _ in $(seq 1 120); do
+            STATUS="$(aws ecs describe-express-gateway-service --region "$REGION" \
+                --service-arn "$SERVICE_ARN" \
+                --query 'service.status.statusCode' --output text 2> /dev/null || echo GONE)"
+            # Terminal states: describe fails once the service is fully
+            # removed (GONE), and INACTIVE is the API's deleted state.
+            if [[ "$STATUS" == "GONE" || "$STATUS" == "None" || "$STATUS" == "INACTIVE" ]]; then
+                break
+            fi
+            sleep 10
+        done
+    fi
     if [[ "$STATUS" == "GONE" || "$STATUS" == "None" || "$STATUS" == "INACTIVE" ]]; then
         rm -f "$STATE_FILE"
     else
-        echo -e "${BOLD}Service still ${STATUS} after 10 minutes${NC} — keeping ${STATE_FILE} so you can retry."
+        echo -e "${BOLD}Service still ${STATUS} after 20 minutes${NC} — keeping ${STATE_FILE} so you can retry."
         echo -e "${DIM}  ARN: ${SERVICE_ARN}${NC}"
         exit 1
     fi
@@ -120,7 +137,7 @@ RDS_SG_ID="$(aws ec2 describe-security-groups --region "$REGION" \
     --filters Name=group-name,Values="$RDS_SG_NAME" \
     --query 'SecurityGroups[0].GroupId' --output text 2> /dev/null || true)"
 if [[ -n "$RDS_SG_ID" && "$RDS_SG_ID" != "None" ]]; then
-    aws ec2 delete-security-group --region "$REGION" --group-id "$RDS_SG_ID" 2> /dev/null \
+    aws ec2 delete-security-group --region "$REGION" --group-id "$RDS_SG_ID" > /dev/null 2>&1 \
         || echo -e "${DIM}Security group ${RDS_SG_ID} still referenced — delete it after the service SGs are gone:${NC}\n${DIM}  aws ec2 delete-security-group --region ${REGION} --group-id ${RDS_SG_ID}${NC}"
 fi
 

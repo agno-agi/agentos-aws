@@ -112,7 +112,7 @@ Keeping a separate `.env.production` lets us use different values for local and 
 ./scripts/aws/up.sh
 ```
 
-This provisions an ECR repo, a private RDS PostgreSQL 17 instance, and Secrets Manager secrets, then makes one `aws ecs create-express-gateway-service` call — which brings the Fargate service, an ALB with HTTPS, security groups, autoscaling (pinned to a single always-on task — the in-process scheduler must not run in replicas), CloudWatch logs and alarms, and a public URL of the form `https://agent-os.ecs.<region>.on.aws`. The script pauses and asks for a JWT verification key for authentication (see next section). The first run takes ~10-15 minutes — RDS is the long pole. Region comes from `AWS_REGION` (default `us-east-1`).
+This provisions an ECR repo, a private RDS PostgreSQL 17 instance, and Secrets Manager secrets, then makes one `aws ecs create-express-gateway-service` call — which brings the Fargate service, an ALB with HTTPS, security groups, autoscaling (pinned to a single always-on task — the in-process scheduler must not run in replicas), CloudWatch logs and alarms, and a public HTTPS URL (`https://ag-<id>.ecs.<region>.on.aws`, generated per service). The script pauses and asks for a JWT verification key for authentication (see next section). The first run takes ~30-45 minutes end to end — the Express gateway's certificate + DNS provisioning (~10-25 min, measured) and RDS (~8 min) are the long poles; the script waits until the gateway actually answers before declaring success, and watches for (and self-heals) the known first-run IAM-propagation wedge. Redeploys take minutes. Region comes from `AWS_REGION` (default `us-east-1`).
 
 > **Cost note.** This stack idles at roughly **$100-110/month**: ≈$70/mo Fargate (2 vCPU/4 GB x86; ARM would be ≈$57 — edit `runtimePlatform` in [`scripts/aws/task-def.json`](scripts/aws/task-def.json) *and* change the `docker build --platform linux/amd64` in `up.sh` and `redeploy.sh` to `linux/arm64`), ≈$17-25/mo for the ALB (shared across up to 25 Express services), and ≈$14/mo for the RDS db.t4g.micro. AWS bills idle resources — tear down what you don't use with `./scripts/aws/down.sh`.
 
@@ -136,10 +136,12 @@ During `./scripts/aws/up.sh`, the script creates your Express service URL and pa
 6. Paste the full public key into the `up.sh` prompt. The script saves it into your env file for future syncs and pushes it to Secrets Manager:
 
 ```sh
-JWT_VERIFICATION_KEY=-----BEGIN PUBLIC KEY-----
+JWT_VERIFICATION_KEY="-----BEGIN PUBLIC KEY-----
 MIIBIjANBgkq...
------END PUBLIC KEY-----
+-----END PUBLIC KEY-----"
 ```
+
+The value is quoted so every parser — docker compose `env_file` included — reads the multi-line PEM as one variable.
 
 > **Heads up.** Live AgentOS Connections are a paid feature. Use `PLATFORM30` to get 1 month off. We are working on a free trial so you don't have to pay to try.
 

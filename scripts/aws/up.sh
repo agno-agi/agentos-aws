@@ -256,6 +256,10 @@ echo -e "${BOLD}Account ${ACCOUNT_ID}, region ${REGION}${NC}"
 echo ""
 echo -e "${BOLD}Ensuring IAM roles...${NC}"
 
+# Tracks whether this run created the roles. Freshly created roles are the
+# known trigger for the silent-wedge failure handled at the end of the script.
+IAM_ROLES_CREATED=""
+
 EXEC_TRUST='{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"ecs-tasks.amazonaws.com"},"Action":"sts:AssumeRole"}]}'
 INFRA_TRUST='{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"ecs.amazonaws.com"},"Action":"sts:AssumeRole"}]}'
 
@@ -263,6 +267,7 @@ if ! aws iam get-role --role-name ecsTaskExecutionRole &> /dev/null; then
     aws iam create-role --role-name ecsTaskExecutionRole \
         --assume-role-policy-document "$EXEC_TRUST" > /dev/null
     echo -e "${DIM}  Created ecsTaskExecutionRole${NC}"
+    IAM_ROLES_CREATED=yes
 fi
 aws iam attach-role-policy --role-name ecsTaskExecutionRole \
     --policy-arn arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
@@ -278,6 +283,7 @@ if ! aws iam get-role --role-name ecsInfrastructureRoleForExpressServices &> /de
     aws iam create-role --role-name ecsInfrastructureRoleForExpressServices \
         --assume-role-policy-document "$INFRA_TRUST" > /dev/null
     echo -e "${DIM}  Created ecsInfrastructureRoleForExpressServices${NC}"
+    IAM_ROLES_CREATED=yes
 fi
 aws iam attach-role-policy --role-name ecsInfrastructureRoleForExpressServices \
     --policy-arn arn:aws:iam::aws:policy/service-role/AmazonECSInfrastructureRoleforExpressGatewayServices
@@ -387,12 +393,14 @@ echo -e "${DIM}Secrets stored under agentos/*${NC}"
 
 # ---------------------------------------------------------------------------
 # Task definition — rendered from scripts/aws/task-def.json.
-# The URL is predictable for Express services (https://<name>.ecs.<region>.on.aws),
-# so AGENTOS_URL is set before the service exists; the describe call after
-# create verifies it and rolls a correcting revision only if reality differs.
+# Express URLs are generated per service (https://ag-<id>.ecs.<region>.on.aws),
+# not derived from the service name — verified empirically; even recreating a
+# same-named service mints a new URL. Revision 1 therefore carries a
+# placeholder AGENTOS_URL (the env file's value if present); the real URL is
+# read back after create and baked in via a correcting revision.
 # ---------------------------------------------------------------------------
-PREDICTED_URL="https://${SERVICE_NAME}.ecs.${REGION}.on.aws"
-AGENTOS_URL_VALUE="${AGENTOS_URL:-$PREDICTED_URL}"
+PLACEHOLDER_URL="https://${SERVICE_NAME}.ecs.${REGION}.on.aws"
+AGENTOS_URL_VALUE="${AGENTOS_URL:-$PLACEHOLDER_URL}"
 
 EXTRA_ENV=""
 [[ -n "$RUNTIME_ENV" ]] && EXTRA_ENV="${EXTRA_ENV}, { \"name\": \"RUNTIME_ENV\", \"value\": \"${RUNTIME_ENV}\" }"
@@ -444,15 +452,9 @@ if [[ -n "$EXISTING_SERVICE_ARN" ]]; then
     [[ "$EXISTING_STATUS" != "ACTIVE" ]] && EXISTING_SERVICE_ARN=""
 fi
 
-echo ""
-if [[ -n "$EXISTING_SERVICE_ARN" ]]; then
-    echo -e "${BOLD}Express Mode service already exists and is ACTIVE — updating instead of creating...${NC}"
-    SERVICE_ARN="$EXISTING_SERVICE_ARN"
-    aws ecs update-express-gateway-service --region "$REGION" \
-        --service-arn "$SERVICE_ARN" \
-        --task-definition-arn "$TASK_DEF_ARN" > /dev/null
-else
-    echo -e "${BOLD}Creating Express Mode service...${NC}"
+# The create → record → resolve-URL sequence lives in functions because the
+# wedge guard at the end of the script re-runs it against a fresh service.
+create_express_service() {
     SERVICE_ARN=""
     for attempt in 1 2 3 4 5 6; do
         # min 1 / max 1 pinned: min 1 keeps the in-process scheduler alive;
@@ -477,48 +479,84 @@ else
         fi
     done
     rm -f tmp/express-create.err
-fi
-echo -e "${DIM}  ${SERVICE_ARN}${NC}"
-{ printf 'SERVICE_ARN=%s\n' "$SERVICE_ARN"; printf 'REGION=%s\n' "$REGION"; } > "$STATE_FILE"
-# Also record the ARN in the env file: tmp/ is gitignored and machine-local,
-# and down.sh needs the ARN to delete the most expensive resource.
-persist_env_var SERVICE_ARN "$SERVICE_ARN" "$ENV_FILE"
+    record_service_state
+}
 
-echo -e "${DIM}Waiting for the service URL...${NC}"
-APP_URL=""
-for _ in $(seq 1 60); do
-    APP_URL="$(aws ecs describe-express-gateway-service --region "$REGION" \
+record_service_state() {
+    echo -e "${DIM}  ${SERVICE_ARN}${NC}"
+    { printf 'SERVICE_ARN=%s\n' "$SERVICE_ARN"; printf 'REGION=%s\n' "$REGION"; } > "$STATE_FILE"
+    # Also record the ARN in the env file: tmp/ is gitignored and machine-local,
+    # and down.sh needs the ARN to delete the most expensive resource.
+    persist_env_var SERVICE_ARN "$SERVICE_ARN" "$ENV_FILE"
+}
+
+wait_service_url() {
+    # NB: guards here are if/then on purpose. A `[[ … ]] && cmd` whose
+    # condition is false as a function's LAST statement makes the function
+    # return 1, and set -e then kills the whole script at the call site —
+    # a silent death this script actually hit before the pattern was removed.
+    echo -e "${DIM}Waiting for the service URL...${NC}"
+    APP_URL=""
+    for _ in $(seq 1 60); do
+        APP_URL="$(aws ecs describe-express-gateway-service --region "$REGION" \
+            --service-arn "$SERVICE_ARN" \
+            --query 'service.activeConfigurations[0].ingressPaths[0].endpoint' \
+            --output text 2> /dev/null || true)"
+        if [[ -n "$APP_URL" && "$APP_URL" != "None" ]]; then
+            break
+        fi
+        sleep 10
+    done
+    if [[ "$APP_URL" == "None" ]]; then
+        APP_URL=""
+    fi
+    if [[ "$APP_URL" != https://* && -n "$APP_URL" ]]; then
+        APP_URL="https://${APP_URL}"
+    fi
+    return 0
+}
+
+echo ""
+if [[ -n "$EXISTING_SERVICE_ARN" ]]; then
+    echo -e "${BOLD}Express Mode service already exists and is ACTIVE — updating instead of creating...${NC}"
+    SERVICE_ARN="$EXISTING_SERVICE_ARN"
+    aws ecs update-express-gateway-service --region "$REGION" \
         --service-arn "$SERVICE_ARN" \
-        --query 'service.activeConfigurations[0].ingressPaths[0].endpoint' \
-        --output text 2> /dev/null || true)"
-    [[ -n "$APP_URL" && "$APP_URL" != "None" ]] && break
-    sleep 10
-done
-[[ "$APP_URL" == "None" ]] && APP_URL=""
-[[ "$APP_URL" != https://* && -n "$APP_URL" ]] && APP_URL="https://${APP_URL}"
+        --task-definition-arn "$TASK_DEF_ARN" > /dev/null
+    record_service_state
+else
+    echo -e "${BOLD}Creating Express Mode service...${NC}"
+    create_express_service
+fi
+
+wait_service_url
 
 # ---------------------------------------------------------------------------
 # Lock down RDS: allow 5432 only from inside the VPC (the Express service's
 # tasks). If the describe output exposes the service SG, narrow to it.
 # ---------------------------------------------------------------------------
-SERVICE_SG="$(aws ecs describe-express-gateway-service --region "$REGION" \
-    --service-arn "$SERVICE_ARN" \
-    --query 'service.activeConfigurations[0].networkConfiguration.securityGroups[0]' \
-    --output text 2> /dev/null || true)"
-if [[ -n "$SERVICE_SG" && "$SERVICE_SG" == sg-* ]]; then
-    aws ec2 authorize-security-group-ingress --region "$REGION" \
-        --group-id "$RDS_SG_ID" --protocol tcp --port 5432 \
-        --source-group "$SERVICE_SG" 2> /dev/null \
-        || echo -e "${DIM}  RDS ingress from service SG already present${NC}"
-    echo -e "${DIM}  RDS ingress: 5432 from ${SERVICE_SG}${NC}"
-else
-    aws ec2 authorize-security-group-ingress --region "$REGION" \
-        --group-id "$RDS_SG_ID" --protocol tcp --port 5432 \
-        --cidr "$VPC_CIDR" 2> /dev/null \
-        || echo -e "${DIM}  RDS ingress from VPC CIDR already present${NC}"
-    echo -e "${DIM}  RDS ingress: 5432 from ${VPC_CIDR} (service SG not exposed by describe;${NC}"
-    echo -e "${DIM}  still private — the DB has no public address)${NC}"
-fi
+lock_down_rds_ingress() {
+    local service_sg
+    service_sg="$(aws ecs describe-express-gateway-service --region "$REGION" \
+        --service-arn "$SERVICE_ARN" \
+        --query 'service.activeConfigurations[0].networkConfiguration.securityGroups[0]' \
+        --output text 2> /dev/null || true)"
+    if [[ -n "$service_sg" && "$service_sg" == sg-* ]]; then
+        aws ec2 authorize-security-group-ingress --region "$REGION" \
+            --group-id "$RDS_SG_ID" --protocol tcp --port 5432 \
+            --source-group "$service_sg" > /dev/null 2>&1 \
+            || echo -e "${DIM}  RDS ingress from service SG already present${NC}"
+        echo -e "${DIM}  RDS ingress: 5432 from ${service_sg}${NC}"
+    else
+        aws ec2 authorize-security-group-ingress --region "$REGION" \
+            --group-id "$RDS_SG_ID" --protocol tcp --port 5432 \
+            --cidr "$VPC_CIDR" > /dev/null 2>&1 \
+            || echo -e "${DIM}  RDS ingress from VPC CIDR already present${NC}"
+        echo -e "${DIM}  RDS ingress: 5432 from ${VPC_CIDR} (service SG not exposed by describe;${NC}"
+        echo -e "${DIM}  still private — the DB has no public address)${NC}"
+    fi
+}
+lock_down_rds_ingress
 
 AUTH_REQUIRES_JWT=1
 [[ "${RUNTIME_ENV:-prd}" == "dev" ]] && AUTH_REQUIRES_JWT=""
@@ -571,12 +609,12 @@ elif [[ -n "$AUTH_REQUIRES_JWT" && -z "$JWT_JWKS_FILE" ]]; then
 fi
 
 if [[ -n "$APP_URL" && "$APP_URL" != "$AGENTOS_URL_VALUE" ]]; then
-    echo -e "${DIM}Actual URL (${APP_URL}) differs from predicted (${AGENTOS_URL_VALUE}) — rolling a fix${NC}"
+    echo -e "${DIM}Baking the real service URL into AGENTOS_URL (generated per service)${NC}"
     AGENTOS_URL_VALUE="$APP_URL"
     NEEDS_REVISION=1
 fi
 
-if [[ -n "$NEEDS_REVISION" ]]; then
+roll_task_def_revision() {
     echo ""
     echo -e "${BOLD}Rolling task definition revision (URL/JWT)...${NC}"
     render_task_def tmp/task-def.rendered.json
@@ -587,15 +625,98 @@ if [[ -n "$NEEDS_REVISION" ]]; then
         --service-arn "$SERVICE_ARN" \
         --task-definition-arn "$TASK_DEF_ARN" > /dev/null
     echo -e "${DIM}  ${TASK_DEF_ARN}${NC}"
-fi
+}
+
+[[ -n "$NEEDS_REVISION" ]] && roll_task_def_revision
 rm -f tmp/task-def.rendered.json
+
+# ---------------------------------------------------------------------------
+# Wedge guard. Express provisions its gateway (ALB, certificate, DNS) async
+# via the infrastructure role. With freshly created IAM roles those calls can
+# be denied before the role's policies propagate — and ECS does not retry:
+# the service reports ACTIVE, the deployment stays IN_PROGRESS forever, and
+# the URL never resolves. The only trace is an AccessDenied CreateLoadBalancer
+# event in CloudTrail, and update-express-gateway-service does NOT retrigger
+# infrastructure creation (all verified empirically, 2026-07). Detection: the
+# endpoint answers no HTTP status at all past the normal provisioning window.
+# Recovery: delete the service and recreate it — automatic, once, for a
+# service this run created.
+# ---------------------------------------------------------------------------
+wait_gateway_answering() {
+    # Success = ANY HTTP status. App-level health is a separate concern: a
+    # 5xx here still proves the gateway exists (e.g. prd without a JWT key,
+    # or the first task still pulling the image).
+    local deadline="$1" start code
+    start=$(date +%s)
+    while :; do
+        code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 8 "${APP_URL}/docs" 2> /dev/null || true)"
+        if [[ -n "$code" && "$code" != "000" ]]; then
+            echo -e "${DIM}  Gateway answering (HTTP ${code}) after $(( $(date +%s) - start ))s${NC}"
+            return 0
+        fi
+        (( $(date +%s) - start >= deadline )) && return 1
+        sleep 15
+    done
+}
+
+print_wedge_forensics() {
+    echo -e "${BOLD}The gateway is still not answering.${NC} Inspect the infrastructure rollout with:"
+    echo -e "${DIM}  aws ecs monitor-express-gateway-service --region ${REGION} --service-arn ${SERVICE_ARN}${NC}"
+    echo -e "${DIM}  aws cloudtrail lookup-events --region ${REGION} --lookup-attributes AttributeKey=EventName,AttributeValue=CreateLoadBalancer --max-results 5${NC}"
+    echo -e "${DIM}If CloudTrail shows AccessDenied, delete the service and re-run this script:${NC}"
+    echo -e "${DIM}  aws ecs delete-express-gateway-service --region ${REGION} --service-arn ${SERVICE_ARN}${NC}"
+}
+
+if [[ -n "$APP_URL" ]] && command -v curl > /dev/null; then
+    echo ""
+    echo -e "${BOLD}Waiting for the gateway to answer${NC} ${DIM}(first-time ALB + certificate + DNS provisioning takes ~10-25 minutes)...${NC}"
+    if ! wait_gateway_answering 1800; then
+        if [[ -z "$EXISTING_SERVICE_ARN" ]]; then
+            echo -e "${BOLD}Gateway infrastructure looks wedged${NC}${DIM} — the known first-run cause is"
+            echo -e "freshly created IAM roles (this run created them: ${IAM_ROLES_CREATED:-no}).${NC}"
+            echo -e "${DIM}Recreating the service once — the recreate reliably provisions...${NC}"
+            aws ecs delete-express-gateway-service --region "$REGION" \
+                --service-arn "$SERVICE_ARN" > /dev/null
+            for _ in $(seq 1 60); do
+                WEDGE_STATUS="$(aws ecs describe-express-gateway-service --region "$REGION" \
+                    --service-arn "$SERVICE_ARN" \
+                    --query 'service.status.statusCode' --output text 2> /dev/null || echo GONE)"
+                if [[ "$WEDGE_STATUS" == "GONE" || "$WEDGE_STATUS" == "None" || "$WEDGE_STATUS" == "INACTIVE" ]]; then
+                    break
+                fi
+                sleep 10
+            done
+            echo -e "${BOLD}Recreating Express Mode service...${NC}"
+            create_express_service
+            wait_service_url
+            if [[ -z "$APP_URL" ]]; then
+                print_wedge_forensics
+                exit 1
+            fi
+            lock_down_rds_ingress
+            if [[ -n "$APP_URL" && "$APP_URL" != "$AGENTOS_URL_VALUE" ]]; then
+                # The recreated service minted a new URL — roll it in.
+                AGENTOS_URL_VALUE="$APP_URL"
+                roll_task_def_revision
+                rm -f tmp/task-def.rendered.json
+            fi
+            if ! wait_gateway_answering 1800; then
+                print_wedge_forensics
+                exit 1
+            fi
+        else
+            print_wedge_forensics
+            exit 1
+        fi
+    fi
+fi
 
 [[ -n "$APP_URL" ]] && persist_env_var AGENTOS_URL "$APP_URL" "$ENV_FILE"
 
 echo ""
-echo -e "${BOLD}Done.${NC} The service is rolling out — give it a few minutes."
+echo -e "${BOLD}Done.${NC} The app finishes rolling out behind the gateway — first boot pulls the image and waits for the DB."
 [[ -n "$APP_URL" ]] && echo -e "${DIM}URL:            ${APP_URL}${NC}"
-echo -e "${DIM}Status:         aws ecs describe-express-gateway-service --region ${REGION} --service-arn ${SERVICE_ARN}${NC}"
+echo -e "${DIM}Watch rollout:  aws ecs monitor-express-gateway-service --region ${REGION} --service-arn ${SERVICE_ARN}${NC}"
 echo -e "${DIM}Logs:           aws logs tail /ecs/agent-os --region ${REGION} --follow${NC}"
 echo -e "${DIM}Sync env vars:  ./scripts/aws/env-sync.sh  (defaults to .env.production)${NC}"
 echo -e "${DIM}Teardown:       ./scripts/aws/down.sh  (AWS bills idle resources — tear down what you don't use)${NC}"
