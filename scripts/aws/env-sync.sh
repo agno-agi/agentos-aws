@@ -52,13 +52,25 @@ if ! command -v aws &> /dev/null; then
     exit 1
 fi
 
-REGION="${AWS_REGION:-us-east-1}"
+# Region precedence: explicit AWS_REGION > the region up.sh recorded in the
+# state file > default. Mirrors down.sh so a fresh shell rolls the service
+# in the region it was deployed to.
+REGION="$AWS_REGION"
+[[ -z "$REGION" && -f "$STATE_FILE" ]] && REGION="$(sed -nE 's/^REGION=(.*)$/\1/p' "$STATE_FILE" | head -1)"
+REGION="${REGION:-us-east-1}"
 
+# Service ARN: state file first (machine-local), then the env files up.sh
+# persists it into (survives fresh clones and cleaned tmp/).
 SERVICE_ARN=""
 [[ -f "$STATE_FILE" ]] && SERVICE_ARN="$(sed -nE 's/^SERVICE_ARN=(.*)$/\1/p' "$STATE_FILE" | head -1)"
 if [[ -z "$SERVICE_ARN" ]]; then
-    echo "No service ARN found in ${STATE_FILE}. Run ./scripts/aws/up.sh first,"
-    echo "or write the ARN of the Express service into that file:"
+    for f in .env.production .env; do
+        [[ -f "$f" ]] && SERVICE_ARN="$(sed -nE 's/^SERVICE_ARN=(.*)$/\1/p' "$f" | head -1)" && [[ -n "$SERVICE_ARN" ]] && break
+    done
+fi
+if [[ -z "$SERVICE_ARN" ]]; then
+    echo "No service ARN found in ${STATE_FILE} or SERVICE_ARN= in .env.production/.env."
+    echo "Run ./scripts/aws/up.sh first, or write the ARN of the Express service into the state file:"
     echo "  printf 'SERVICE_ARN=arn:aws:ecs:...' > ${STATE_FILE}"
     exit 1
 fi
@@ -108,11 +120,15 @@ sed_escape() {
     printf '%s' "$v"
 }
 
-# JSON-escape the characters that can appear in env values.
+# JSON-escape the characters that can appear in env values, including the
+# newlines/control chars of multi-line values.
 json_escape() {
     local v="$1"
     v="${v//\\/\\\\}"
     v="${v//\"/\\\"}"
+    v="${v//$'\n'/\\n}"
+    v="${v//$'\r'/\\r}"
+    v="${v//$'\t'/\\t}"
     printf '%s' "$v"
 }
 
@@ -162,6 +178,9 @@ ${line}"
     case "$current_key" in
         DB_HOST|DB_PORT|DB_USER|DB_DATABASE|DB_DRIVER)
             echo -e "${DIM}  Skipping ${current_key} (computed from the provisioned RDS instance)${NC}"
+            ;;
+        SERVICE_ARN)
+            echo -e "${DIM}  Skipping SERVICE_ARN (deploy metadata, not a container env var)${NC}"
             ;;
         AGENTOS_URL)
             AGENTOS_URL_VALUE="$current_value"

@@ -35,12 +35,27 @@ if ! command -v docker &> /dev/null || ! docker info &> /dev/null; then
     exit 1
 fi
 
-if [[ ! -f "$STATE_FILE" ]]; then
-    echo "No service state in ${STATE_FILE}. Run ./scripts/aws/up.sh first."
+# Service ARN: state file first (machine-local), then the env files up.sh
+# persists it into (survives fresh clones and cleaned tmp/). env-sync.sh
+# resolves it the same way — this preflight just fails fast before a build.
+SERVICE_ARN=""
+[[ -f "$STATE_FILE" ]] && SERVICE_ARN="$(sed -nE 's/^SERVICE_ARN=(.*)$/\1/p' "$STATE_FILE" | head -1)"
+if [[ -z "$SERVICE_ARN" ]]; then
+    for f in .env.production .env; do
+        [[ -f "$f" ]] && SERVICE_ARN="$(sed -nE 's/^SERVICE_ARN=(.*)$/\1/p' "$f" | head -1)" && [[ -n "$SERVICE_ARN" ]] && break
+    done
+fi
+if [[ -z "$SERVICE_ARN" ]]; then
+    echo "No service state in ${STATE_FILE} or SERVICE_ARN= in .env.production/.env. Run ./scripts/aws/up.sh first."
     exit 1
 fi
 
-REGION="${AWS_REGION:-us-east-1}"
+# Region precedence: explicit AWS_REGION > the region up.sh recorded in the
+# state file > default. Mirrors down.sh so the image lands in the ECR repo
+# the service actually pulls from.
+REGION="$AWS_REGION"
+[[ -z "$REGION" && -f "$STATE_FILE" ]] && REGION="$(sed -nE 's/^REGION=(.*)$/\1/p' "$STATE_FILE" | head -1)"
+REGION="${REGION:-us-east-1}"
 ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
 IMAGE="${ACCOUNT_ID}.dkr.ecr.${REGION}.amazonaws.com/${ECR_REPO}:latest"
 

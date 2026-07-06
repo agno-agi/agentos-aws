@@ -21,7 +21,8 @@
 #    app's CREATE EXTENSION), Secrets Manager secrets, IAM roles, and one
 #    ECS Express Mode service — which brings its own ALB, HTTPS URL,
 #    autoscaling, and CloudWatch wiring. Sizing rides in the task
-#    definition: 2 vCPU / 4 GB (family parity; Express default is 1/2).
+#    definition: 2 vCPU / 4 GB (family parity; the Express default is a
+#    much smaller 0.25 vCPU / 512 MiB).
 #
 #    Overrides: AWS_REGION (default: us-east-1)
 #
@@ -69,11 +70,13 @@ persist_env_var() {
 
 # Persist a multi-line env value. Existing active KEY= blocks are removed before
 # appending the new value; commented examples are left alone as documentation.
+# Written quoted (KEY="...") — example.env's documented form, which every
+# parser (docker compose env_file included) reads as one variable.
 persist_multiline_env_var() {
     local key="$1" value="$2" file="$3" tmp line skipping=0 value_part
     [[ -z "$file" ]] && return
     if [[ ! -f "$file" ]]; then
-        printf '%s=%s\n' "$key" "$value" > "$file"
+        printf '%s="%s"\n' "$key" "$value" > "$file"
         return
     fi
 
@@ -96,7 +99,7 @@ persist_multiline_env_var() {
     done < "$file"
 
     [[ -s "$tmp" ]] && printf '\n' >> "$tmp"
-    printf '%s=%s\n' "$key" "$value" >> "$tmp"
+    printf '%s="%s"\n' "$key" "$value" >> "$tmp"
     cat "$tmp" > "$file"
     rm -f "$tmp"
 }
@@ -300,12 +303,12 @@ echo ""
 echo -e "${BOLD}Provisioning RDS PostgreSQL...${NC}"
 VPC_ID="$(aws ec2 describe-vpcs --region "$REGION" \
     --filters Name=is-default,Values=true --query 'Vpcs[0].VpcId' --output text)"
-VPC_CIDR="$(aws ec2 describe-vpcs --region "$REGION" \
-    --vpc-ids "$VPC_ID" --query 'Vpcs[0].CidrBlock' --output text)"
 if [[ -z "$VPC_ID" || "$VPC_ID" == "None" ]]; then
     echo "No default VPC in ${REGION}. Create one (aws ec2 create-default-vpc) or adapt the script."
     exit 1
 fi
+VPC_CIDR="$(aws ec2 describe-vpcs --region "$REGION" \
+    --vpc-ids "$VPC_ID" --query 'Vpcs[0].CidrBlock' --output text)"
 
 RDS_SG_ID="$(aws ec2 describe-security-groups --region "$REGION" \
     --filters Name=group-name,Values="$RDS_SG_NAME" Name=vpc-id,Values="$VPC_ID" \
@@ -424,32 +427,57 @@ echo -e "${DIM}  ${TASK_DEF_ARN}${NC}"
 # ALB health checks pass with JWT auth on. Retries cover the documented
 # IAM eventual-consistency window after fresh role creation.
 # ---------------------------------------------------------------------------
+# Re-runs against an existing deployment skip creation and roll the freshly
+# registered revision instead. ARN resolution mirrors down.sh: state file
+# first (machine-local), then the env files up.sh persists it into.
+EXISTING_SERVICE_ARN=""
+[[ -f "$STATE_FILE" ]] && EXISTING_SERVICE_ARN="$(sed -nE 's/^SERVICE_ARN=(.*)$/\1/p' "$STATE_FILE" | head -1)"
+if [[ -z "$EXISTING_SERVICE_ARN" ]]; then
+    for f in .env.production .env; do
+        [[ -f "$f" ]] && EXISTING_SERVICE_ARN="$(sed -nE 's/^SERVICE_ARN=(.*)$/\1/p' "$f" | head -1)" && [[ -n "$EXISTING_SERVICE_ARN" ]] && break
+    done
+fi
+if [[ -n "$EXISTING_SERVICE_ARN" ]]; then
+    EXISTING_STATUS="$(aws ecs describe-express-gateway-service --region "$REGION" \
+        --service-arn "$EXISTING_SERVICE_ARN" \
+        --query 'service.status.statusCode' --output text 2> /dev/null || true)"
+    [[ "$EXISTING_STATUS" != "ACTIVE" ]] && EXISTING_SERVICE_ARN=""
+fi
+
 echo ""
-echo -e "${BOLD}Creating Express Mode service...${NC}"
-SERVICE_ARN=""
-for attempt in 1 2 3 4 5 6; do
-    # min 1 / max 1 pinned: min 1 keeps the in-process scheduler alive;
-    # max 1 because scale-out would run N schedulers double-firing every
-    # cron (same reason the Fly sibling deploys --ha=false).
-    if CREATE_OUT="$(aws ecs create-express-gateway-service --region "$REGION" \
-        --service-name "$SERVICE_NAME" \
-        --task-definition-arn "$TASK_DEF_ARN" \
-        --infrastructure-role-arn "$INFRA_ROLE_ARN" \
-        --health-check-path /health \
-        --scaling-target '{"minTaskCount": 1, "maxTaskCount": 1}' \
-        --query 'service.serviceArn' --output text 2> tmp/express-create.err)"; then
-        SERVICE_ARN="$CREATE_OUT"
-        break
-    fi
-    if grep -qiE 'assume|not authorized|invalid.*role' tmp/express-create.err && [[ $attempt -lt 6 ]]; then
-        echo -e "${DIM}  IAM roles still propagating (attempt ${attempt}/6) — retrying in 10s...${NC}"
-        sleep 10
-    else
-        cat tmp/express-create.err
-        exit 1
-    fi
-done
-rm -f tmp/express-create.err
+if [[ -n "$EXISTING_SERVICE_ARN" ]]; then
+    echo -e "${BOLD}Express Mode service already exists and is ACTIVE — updating instead of creating...${NC}"
+    SERVICE_ARN="$EXISTING_SERVICE_ARN"
+    aws ecs update-express-gateway-service --region "$REGION" \
+        --service-arn "$SERVICE_ARN" \
+        --task-definition-arn "$TASK_DEF_ARN" > /dev/null
+else
+    echo -e "${BOLD}Creating Express Mode service...${NC}"
+    SERVICE_ARN=""
+    for attempt in 1 2 3 4 5 6; do
+        # min 1 / max 1 pinned: min 1 keeps the in-process scheduler alive;
+        # max 1 because scale-out would run N schedulers double-firing every
+        # cron (same reason the Fly sibling deploys --ha=false).
+        if CREATE_OUT="$(aws ecs create-express-gateway-service --region "$REGION" \
+            --service-name "$SERVICE_NAME" \
+            --task-definition-arn "$TASK_DEF_ARN" \
+            --infrastructure-role-arn "$INFRA_ROLE_ARN" \
+            --health-check-path /health \
+            --scaling-target '{"minTaskCount": 1, "maxTaskCount": 1}' \
+            --query 'service.serviceArn' --output text 2> tmp/express-create.err)"; then
+            SERVICE_ARN="$CREATE_OUT"
+            break
+        fi
+        if grep -qiE 'assume|not authorized|invalid.*role' tmp/express-create.err && [[ $attempt -lt 6 ]]; then
+            echo -e "${DIM}  IAM roles still propagating (attempt ${attempt}/6) — retrying in 10s...${NC}"
+            sleep 10
+        else
+            cat tmp/express-create.err
+            exit 1
+        fi
+    done
+    rm -f tmp/express-create.err
+fi
 echo -e "${DIM}  ${SERVICE_ARN}${NC}"
 { printf 'SERVICE_ARN=%s\n' "$SERVICE_ARN"; printf 'REGION=%s\n' "$REGION"; } > "$STATE_FILE"
 # Also record the ARN in the env file: tmp/ is gitignored and machine-local,
