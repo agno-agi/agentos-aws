@@ -148,7 +148,7 @@ fi
 
 # Orphaned shared Express gateway ALB. ECS Express provisions a shared,
 # AmazonECSManaged ALB ("up to 25 services share one"); deleting the last
-# Express service does NOT remove it — it lingers and bills (~$16/mo), and
+# Express service does NOT remove it — it lingers and bills (~$17-25/mo), and
 # `describe-express-gateway-service` reports stale DRAINING forever. Remove it,
 # its target groups, and its SG — scoped PER ALB: only delete an express-gateway
 # ALB when every target group attached to it has 0 registered targets, so a
