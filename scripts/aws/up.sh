@@ -719,6 +719,7 @@ echo -e "${BOLD}Done.${NC} The app finishes rolling out behind the gateway — f
 echo -e "${DIM}Watch rollout:  aws ecs monitor-express-gateway-service --region ${REGION} --service-arn ${SERVICE_ARN}${NC}"
 echo -e "${DIM}Logs:           aws logs tail /ecs/agent-os --region ${REGION} --follow${NC}"
 echo -e "${DIM}Sync env vars:  ./scripts/aws/env-sync.sh  (defaults to .env.production)${NC}"
+[[ -n "$APP_URL" ]] && echo -e "${DIM}Connect apps:   uvx agno connect --url ${APP_URL}  (Claude Desktop + coding agents; mints a service-account token — see README)${NC}"
 echo -e "${DIM}Teardown:       ./scripts/aws/down.sh  (AWS bills idle resources — tear down what you don't use)${NC}"
 echo -e "${DIM}Cost:           ~\$70/mo Fargate (2 vCPU/4GB x86) + ~\$17-25/mo ALB (shared across up${NC}"
 echo -e "${DIM}                to 25 Express services) + ~\$14/mo RDS db.t4g.micro ≈ \$100-110/mo.${NC}"
