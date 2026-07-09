@@ -24,6 +24,10 @@
 #    definition: 2 vCPU / 4 GB (family parity; the Express default is a
 #    much smaller 0.25 vCPU / 512 MiB).
 #
+#    Generates MCP_CONNECT_SECRET (chat-app OAuth) into the env file when
+#    missing, and pauses for JWT_VERIFICATION_KEY/JWT_JWKS_FILE when
+#    production auth would otherwise prevent the first deploy from serving.
+#
 #    Overrides: AWS_REGION (default: us-east-1)
 #
 ############################################################################
@@ -254,7 +258,7 @@ echo -e "${BOLD}Account ${ACCOUNT_ID}, region ${REGION}${NC}"
 #     manage the ALB, target groups, SGs, and autoscaling on our behalf.
 # ---------------------------------------------------------------------------
 echo ""
-echo -e "${BOLD}Ensuring IAM roles...${NC}"
+echo -e "${ORANGE}▸${NC} ${BOLD}Ensuring IAM roles${NC}"
 
 # Tracks whether this run created the roles. Freshly created roles are the
 # known trigger for the silent-wedge failure handled at the end of the script.
@@ -293,7 +297,7 @@ INFRA_ROLE_ARN="arn:aws:iam::${ACCOUNT_ID}:role/ecsInfrastructureRoleForExpressS
 # ECR: repo + build + push
 # ---------------------------------------------------------------------------
 echo ""
-echo -e "${BOLD}Ensuring ECR repo + pushing image (linux/amd64)...${NC}"
+echo -e "${ORANGE}▸${NC} ${BOLD}Ensuring ECR repo + pushing image (linux/amd64)${NC}"
 aws ecr describe-repositories --repository-names "$ECR_REPO" --region "$REGION" &> /dev/null \
     || aws ecr create-repository --repository-name "$ECR_REPO" --region "$REGION" > /dev/null
 aws ecr get-login-password --region "$REGION" \
@@ -306,7 +310,7 @@ docker push "$IMAGE"
 # available on RDS PG; the app runs CREATE EXTENSION IF NOT EXISTS itself.
 # ---------------------------------------------------------------------------
 echo ""
-echo -e "${BOLD}Provisioning RDS PostgreSQL...${NC}"
+echo -e "${ORANGE}▸${NC} ${BOLD}Provisioning RDS PostgreSQL${NC}"
 VPC_ID="$(aws ec2 describe-vpcs --region "$REGION" \
     --filters Name=is-default,Values=true --query 'Vpcs[0].VpcId' --output text)"
 if [[ -z "$VPC_ID" || "$VPC_ID" == "None" ]]; then
@@ -368,7 +372,7 @@ echo -e "${DIM}  RDS endpoint: ${DB_HOST}${NC}"
 # Secrets Manager
 # ---------------------------------------------------------------------------
 echo ""
-echo -e "${BOLD}Storing secrets in Secrets Manager...${NC}"
+echo -e "${ORANGE}▸${NC} ${BOLD}Storing secrets in Secrets Manager${NC}"
 OPENAI_SECRET_ARN="$(put_secret agentos/openai-api-key "$OPENAI_API_KEY")"
 if [[ -n "$DB_PASSWORD" ]]; then
     DB_PASS_SECRET_ARN="$(put_secret agentos/db-pass "$DB_PASSWORD")"
@@ -420,7 +424,7 @@ render_task_def() {
 }
 
 echo ""
-echo -e "${BOLD}Registering task definition (2 vCPU / 4 GB)...${NC}"
+echo -e "${ORANGE}▸${NC} ${BOLD}Registering task definition (2 vCPU / 4 GB)${NC}"
 mkdir -p tmp
 render_task_def tmp/task-def.rendered.json
 TASK_DEF_ARN="$(aws ecs register-task-definition --region "$REGION" \
@@ -518,14 +522,14 @@ wait_service_url() {
 
 echo ""
 if [[ -n "$EXISTING_SERVICE_ARN" ]]; then
-    echo -e "${BOLD}Express Mode service already exists and is ACTIVE — updating instead of creating...${NC}"
+    echo -e "${ORANGE}▸${NC} ${BOLD}Express Mode service already exists and is ACTIVE — updating instead of creating${NC}"
     SERVICE_ARN="$EXISTING_SERVICE_ARN"
     aws ecs update-express-gateway-service --region "$REGION" \
         --service-arn "$SERVICE_ARN" \
         --task-definition-arn "$TASK_DEF_ARN" > /dev/null
     record_service_state
 else
-    echo -e "${BOLD}Creating Express Mode service...${NC}"
+    echo -e "${ORANGE}▸${NC} ${BOLD}Creating Express Mode service${NC}"
     create_express_service
 fi
 
@@ -567,7 +571,7 @@ AUTH_REQUIRES_JWT=1
 # the correcting revision below.
 if [[ -n "$AUTH_REQUIRES_JWT" && -z "$JWT_VERIFICATION_KEY" && -z "$JWT_JWKS_FILE" && -t 0 ]]; then
     echo ""
-    echo -e "${BOLD}JWT_VERIFICATION_KEY not set${NC} — AgentOS won't serve production traffic without auth."
+    echo -e "${ORANGE}▸${NC} ${BOLD}JWT_VERIFICATION_KEY not set${NC} — AgentOS won't serve production traffic without auth."
     echo -e "  1. Open ${BOLD}https://os.agno.com${NC} -> Connect OS -> Live -> enter ${APP_URL:-your service URL}"
     echo -e "  2. Name it ${BOLD}Live AgentOS${NC}"
     echo -e "  3. Note: Live AgentOS Connections are a paid feature; use ${BOLD}PLATFORM30${NC} to get 1 month off"
@@ -608,6 +612,26 @@ elif [[ -n "$AUTH_REQUIRES_JWT" && -z "$JWT_JWKS_FILE" ]]; then
     echo -e "${DIM}you add JWT_VERIFICATION_KEY or JWT_JWKS_FILE to ${ENV_FILE:-.env.production} and run ./scripts/aws/env-sync.sh.${NC}"
 fi
 
+# MCP OAuth — claude.ai and ChatGPT (web) connect over OAuth only, and the
+# consent page is gated by MCP_CONNECT_SECRET, so the user must create the secret manually.
+# We generate a secret on behalf of the user when the env file doesn't have one.
+# It lands in Secrets Manager and rides into the correcting revision below —
+# appended to EXTRA_SECRETS here, before roll_task_def_revision first runs,
+# so the wedge-guard re-roll at the end of the script carries it too.
+if [[ -z "$MCP_CONNECT_SECRET" && -n "$APP_URL" ]]; then
+    MCP_CONNECT_SECRET="$(openssl rand -base64 32)"
+    export MCP_CONNECT_SECRET
+    ENV_FILE="${ENV_FILE:-.env.production}"
+    [[ -f "$ENV_FILE" ]] || : > "$ENV_FILE"
+    persist_env_var MCP_CONNECT_SECRET "$MCP_CONNECT_SECRET" "$ENV_FILE"
+    echo -e "${DIM}Generated MCP_CONNECT_SECRET -> ${ENV_FILE} + Secrets Manager (shown in the summary below)${NC}"
+fi
+if [[ -n "$MCP_CONNECT_SECRET" ]]; then
+    MCP_CONNECT_SECRET_ARN="$(put_secret agentos/mcp-connect-secret "$MCP_CONNECT_SECRET")"
+    EXTRA_SECRETS="${EXTRA_SECRETS}, { \"name\": \"MCP_CONNECT_SECRET\", \"valueFrom\": \"${MCP_CONNECT_SECRET_ARN}\" }"
+    NEEDS_REVISION=1
+fi
+
 if [[ -n "$APP_URL" && "$APP_URL" != "$AGENTOS_URL_VALUE" ]]; then
     echo -e "${DIM}Baking the real service URL into AGENTOS_URL (generated per service)${NC}"
     AGENTOS_URL_VALUE="$APP_URL"
@@ -616,7 +640,7 @@ fi
 
 roll_task_def_revision() {
     echo ""
-    echo -e "${BOLD}Rolling task definition revision (URL/JWT)...${NC}"
+    echo -e "${ORANGE}▸${NC} ${BOLD}Rolling task definition revision (URL/JWT/MCP secret)${NC}"
     render_task_def tmp/task-def.rendered.json
     TASK_DEF_ARN="$(aws ecs register-task-definition --region "$REGION" \
         --cli-input-json file://tmp/task-def.rendered.json \
@@ -669,7 +693,7 @@ print_wedge_forensics() {
 
 if [[ -n "$APP_URL" ]] && command -v curl > /dev/null; then
     echo ""
-    echo -e "${BOLD}Waiting for the gateway to answer${NC} ${DIM}(first-time ALB + certificate + DNS provisioning takes ~10-25 minutes)...${NC}"
+    echo -e "${ORANGE}▸${NC} ${BOLD}Waiting for the gateway to answer${NC} ${DIM}(first-time ALB + certificate + DNS provisioning takes ~10-25 minutes)...${NC}"
     if ! wait_gateway_answering 1800; then
         if [[ -z "$EXISTING_SERVICE_ARN" ]]; then
             echo -e "${BOLD}Gateway infrastructure looks wedged${NC}${DIM} — the known first-run cause is"
@@ -686,7 +710,7 @@ if [[ -n "$APP_URL" ]] && command -v curl > /dev/null; then
                 fi
                 sleep 10
             done
-            echo -e "${BOLD}Recreating Express Mode service...${NC}"
+            echo -e "${ORANGE}▸${NC} ${BOLD}Recreating Express Mode service${NC}"
             create_express_service
             wait_service_url
             if [[ -z "$APP_URL" ]]; then
@@ -718,8 +742,14 @@ echo -e "${BOLD}Done.${NC} The app finishes rolling out behind the gateway — f
 [[ -n "$APP_URL" ]] && echo -e "${DIM}URL:            ${APP_URL}${NC}"
 echo -e "${DIM}Watch rollout:  aws ecs monitor-express-gateway-service --region ${REGION} --service-arn ${SERVICE_ARN}${NC}"
 echo -e "${DIM}Logs:           aws logs tail /ecs/agent-os --region ${REGION} --follow${NC}"
-echo -e "${DIM}Sync env vars:  ./scripts/aws/env-sync.sh  (defaults to .env.production)${NC}"
-[[ -n "$APP_URL" ]] && echo -e "${DIM}Connect apps:   uvx agno connect --url ${APP_URL}  (Claude Desktop + coding agents; mints a service-account token — see README)${NC}"
+echo -e "${DIM}Sync env vars:  ./scripts/aws/env-sync.sh${NC}"
+[[ -n "$APP_URL" ]] && echo -e "${DIM}Connect apps:   uvx agno connect --url ${APP_URL}${NC}"
+if [[ -n "$APP_URL" && -n "$MCP_CONNECT_SECRET" ]]; then
+    echo -e "${DIM}Chat apps:      add ${APP_URL}/mcp as a custom connector in claude.ai / ChatGPT${NC}"
+    echo -e "${DIM}                (leave the optional OAuth client ID/secret fields empty).${NC}"
+    echo -e "${DIM}                Then click Connect and approve the consent page with this secret:${NC}"
+    echo -e "${BOLD}                ${MCP_CONNECT_SECRET}${NC}"
+fi
 echo -e "${DIM}Teardown:       ./scripts/aws/down.sh  (AWS bills idle resources — tear down what you don't use)${NC}"
 echo -e "${DIM}Cost:           ~\$70/mo Fargate (2 vCPU/4GB x86) + ~\$17-25/mo ALB (shared across up${NC}"
 echo -e "${DIM}                to 25 Express services) + ~\$14/mo RDS db.t4g.micro ≈ \$100-110/mo.${NC}"

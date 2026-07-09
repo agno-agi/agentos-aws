@@ -18,6 +18,8 @@
 set -e
 
 # Colors
+ORANGE='\033[38;5;208m'
+DIM='\033[2m'
 BOLD='\033[1m'
 NC='\033[0m'
 
@@ -60,7 +62,7 @@ ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
 IMAGE="${ACCOUNT_ID}.dkr.ecr.${REGION}.amazonaws.com/${ECR_REPO}:latest"
 
 echo ""
-echo -e "${BOLD}Building and pushing image (linux/amd64)...${NC}"
+echo -e "${ORANGE}▸${NC} ${BOLD}Building and pushing image (linux/amd64)${NC}"
 echo ""
 aws ecr get-login-password --region "$REGION" \
     | docker login --username AWS --password-stdin "${ACCOUNT_ID}.dkr.ecr.${REGION}.amazonaws.com"
@@ -68,5 +70,7 @@ docker build --platform linux/amd64 -t "$IMAGE" .
 docker push "$IMAGE"
 
 echo ""
-echo -e "${BOLD}Rolling the service to the new build...${NC}"
+echo -e "${ORANGE}▸${NC} ${BOLD}Rolling the service to the new build${NC}"
+echo ""
+echo -e "${DIM}> ./scripts/aws/env-sync.sh${NC}"
 "$(dirname "$0")/env-sync.sh" "$@"

@@ -21,6 +21,7 @@
 set -e
 
 # Colors
+ORANGE='\033[38;5;208m'
 DIM='\033[2m'
 BOLD='\033[1m'
 RED='\033[31m'
@@ -31,7 +32,7 @@ RDS_INSTANCE="agentos-db"
 RDS_SUBNET_GROUP="agentos-db-subnets"
 RDS_SG_NAME="agentos-rds-sg"
 STATE_FILE="tmp/agentos-aws.state"
-SECRETS=(agentos/openai-api-key agentos/db-pass agentos/jwt-verification-key agentos/parallel-api-key agentos/slack-bot-token agentos/slack-signing-secret)
+SECRETS=(agentos/openai-api-key agentos/db-pass agentos/jwt-verification-key agentos/parallel-api-key agentos/slack-bot-token agentos/slack-signing-secret agentos/mcp-connect-secret agentos/agentos-mcp-signing-key)
 
 # Preflight
 if ! command -v aws &> /dev/null; then
@@ -57,7 +58,9 @@ if [[ -z "$SERVICE_ARN" ]]; then
 fi
 
 echo ""
-echo -e "${BOLD}This deletes from region ${REGION}:${NC}"
+echo -e "${ORANGE}▸${NC} ${BOLD}AWS Teardown${NC}"
+echo ""
+echo -e "This deletes from region ${REGION}:"
 echo -e "  - Express service    ${SERVICE_ARN:-<no ARN in ${STATE_FILE} — will skip>}"
 echo -e "  - RDS instance       ${RDS_INSTANCE}  ${RED}(all data deleted, no final snapshot)${NC}"
 echo -e "  - ECR repo           ${ECR_REPO} (all images)"
@@ -92,7 +95,7 @@ elif grep -qiE 'not.?found|DBInstanceNotFound' <<< "$RDS_DEL_ERR"; then
 else
     # A real failure (deletion protection, invalid state, throttling) — do NOT
     # swallow it as "already gone": the DB may still be running and billing.
-    echo -e "${BOLD}Warning: RDS delete did not succeed — the database may still be billing:${NC}"
+    echo -e "${RED}${BOLD}Warning: RDS delete did not succeed${NC} — the database may still be billing:"
     echo -e "${DIM}${RDS_DEL_ERR}${NC}"
     echo -e "${DIM}  Retry: aws rds delete-db-instance --region ${REGION} --db-instance-identifier ${RDS_INSTANCE} --skip-final-snapshot --delete-automated-backups${NC}"
 fi
@@ -136,7 +139,7 @@ if [[ -n "$SERVICE_ARN" ]]; then
     if [[ "$STATUS" == "GONE" || "$STATUS" == "None" || "$STATUS" == "INACTIVE" ]]; then
         rm -f "$STATE_FILE"
     else
-        echo -e "${BOLD}Service still ${STATUS} after 40 minutes${NC} — it finishes deleting"
+        echo -e "${RED}${BOLD}Service still ${STATUS} after 40 minutes${NC} — it finishes deleting"
         echo -e "asynchronously. Keeping ${STATE_FILE}; continuing teardown so nothing is left"
         echo -e "billing. Re-run ./scripts/aws/down.sh --yes later to confirm the service is gone."
         echo -e "${DIM}  ARN: ${SERVICE_ARN}${NC}"

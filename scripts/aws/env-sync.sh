@@ -9,10 +9,11 @@
 #      ./scripts/aws/env-sync.sh .env        # syncs .env instead
 #
 #    Reads the file, pushes secret-shaped keys (API keys, DB_PASS,
-#    JWT_VERIFICATION_KEY, Slack credentials) to Secrets Manager, renders a
-#    fresh task-definition revision carrying everything else as plain env
-#    vars, and rolls the Express service to it (one rolling deployment).
-#    Multi-line values (PEM-formatted JWT_VERIFICATION_KEY) are handled.
+#    JWT_VERIFICATION_KEY, Slack credentials, MCP OAuth secrets) to
+#    Secrets Manager, renders a fresh task-definition revision carrying
+#    everything else as plain env vars, and rolls the Express service to
+#    it (one rolling deployment). Multi-line values (PEM-formatted
+#    JWT_VERIFICATION_KEY) are handled.
 #
 #    DB_HOST/DB_PORT/DB_USER/DB_DATABASE are computed from the RDS instance
 #    this template provisioned and are skipped if present in the env file —
@@ -25,6 +26,7 @@
 set -e
 
 # Colors
+ORANGE='\033[38;5;208m'
 DIM='\033[2m'
 BOLD='\033[1m'
 NC='\033[0m'
@@ -99,7 +101,7 @@ put_secret() {
 # Keys that must live in Secrets Manager rather than plain task-def env vars.
 is_secret_key() {
     case "$1" in
-        OPENAI_API_KEY|DB_PASS|JWT_VERIFICATION_KEY|PARALLEL_API_KEY|SLACK_BOT_TOKEN|SLACK_SIGNING_SECRET) return 0 ;;
+        OPENAI_API_KEY|DB_PASS|JWT_VERIFICATION_KEY|PARALLEL_API_KEY|SLACK_BOT_TOKEN|SLACK_SIGNING_SECRET|MCP_CONNECT_SECRET|AGENTOS_MCP_SIGNING_KEY) return 0 ;;
         *) return 1 ;;
     esac
 }
@@ -133,7 +135,9 @@ json_escape() {
 }
 
 echo ""
-echo -e "${BOLD}Syncing env vars from ${ENV_FILE} to Express service ${SERVICE_NAME}...${NC}"
+echo -e "${ORANGE}▸${NC} ${BOLD}Syncing env vars${NC}"
+echo ""
+echo -e "${DIM}> ${ENV_FILE} -> Express service ${SERVICE_NAME}${NC}"
 echo ""
 
 # Parse the env file, treating PEM blocks (and other multiline values)
