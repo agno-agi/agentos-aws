@@ -606,7 +606,12 @@ if [[ -n "$JWT_VERIFICATION_KEY" ]]; then
     JWT_SECRET_ARN="$(put_secret agentos/jwt-verification-key "$JWT_VERIFICATION_KEY")"
     EXTRA_SECRETS="${EXTRA_SECRETS}, { \"name\": \"JWT_VERIFICATION_KEY\", \"valueFrom\": \"${JWT_SECRET_ARN}\" }"
     NEEDS_REVISION=1
-elif [[ -n "$AUTH_REQUIRES_JWT" && -z "$JWT_JWKS_FILE" ]]; then
+elif [[ -n "$JWT_JWKS_FILE" ]]; then
+    echo ""
+    echo -e "${DIM}Setting JWT_JWKS_FILE=${JWT_JWKS_FILE}${NC}"
+    EXTRA_ENV="${EXTRA_ENV}, { \"name\": \"JWT_JWKS_FILE\", \"value\": \"${JWT_JWKS_FILE}\" }"
+    NEEDS_REVISION=1
+elif [[ -n "$AUTH_REQUIRES_JWT" ]]; then
     echo ""
     echo -e "${DIM}Deployed without JWT auth config — the app will refuse traffic until${NC}"
     echo -e "${DIM}you add JWT_VERIFICATION_KEY or JWT_JWKS_FILE to ${ENV_FILE:-.env.production} and run ./scripts/aws/env-sync.sh.${NC}"
