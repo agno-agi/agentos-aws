@@ -46,7 +46,7 @@ Shared:
 | [`evals/cases.py`](evals/cases.py) | Eval cases (each is a `Case` with optional judge + reliability checks). |
 | [`evals/__main__.py`](evals/__main__.py) | `python -m evals` — thin entrypoint over agno's eval suite runner (`agno.eval.cli`). |
 | [`.agents/skills/`](.agents/skills/) | Dev-time **coding-agent workflows** (`setup-platform`, `create-new-agent`, `extend-agent`, `improve-agent`, `eval-and-improve`, `review-and-improve`) — slash commands coding agents run *on this repo*. `.claude/skills` is a committed symlink into it — see [Working with coding agents](#working-with-coding-agents). |
-| [`README.md`](README.md) | Public entry point — leads with a four-line prompt that hands a coding agent to the `setup-platform` skill (clone to first agent). |
+| [`README.md`](README.md) | Public entry point — its Get Started prompt hands a coding agent to the `setup-platform` skill (clone to first agent). |
 | [`compose.yaml`](compose.yaml) | Docker Compose for local development. |
 | [`scripts/aws/`](scripts/aws/) | AWS deploy layer — `up.sh` provisions ECR + RDS Postgres 17 (private) + Secrets Manager + an ECS Express Mode service; `env-sync`/`redeploy`/`down` manage the lifecycle. |
 | [`scripts/aws/task-def.json`](scripts/aws/task-def.json) | Custom Express task definition — container `Main`, port 8000, 2 vCPU/4 GB, Secrets Manager injection; rendered by the scripts. |
