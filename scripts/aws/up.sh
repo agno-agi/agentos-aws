@@ -613,7 +613,7 @@ elif [[ -n "$JWT_JWKS_FILE" ]]; then
     NEEDS_REVISION=1
 elif [[ -n "$AUTH_REQUIRES_JWT" ]]; then
     echo ""
-    echo -e "${DIM}Deployed without JWT auth config — the app will refuse traffic until${NC}"
+    echo -e "${DIM}Deploying without JWT auth config — the ECS task exits on boot and its ALB target never turns healthy until${NC}"
     echo -e "${DIM}you add JWT_VERIFICATION_KEY or JWT_JWKS_FILE to ${ENV_FILE:-.env.production} and run ./scripts/aws/env-sync.sh.${NC}"
 fi
 
