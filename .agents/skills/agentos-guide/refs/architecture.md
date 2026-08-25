@@ -1,4 +1,4 @@
-# AgentOS Architecture
+## Architecture
 
 ```
 AgentOS  (app/main.py)
@@ -11,39 +11,17 @@ AgentOS  (app/main.py)
 └── RunEvals         (workflows/run_evals.py) — opt-in eval suite workflow
 ```
 
-## Shared Resources
+Shared:
+- PostgreSQL + pgvector for sessions, memory, knowledge.
+- All four reference components (the Agno team and the three agents) wire the LearningMachine's per-user profile and memory stores over the shared DB — one human, one self across every agent. Entities and notes stay Agno's. The three agents carry the one declaration in [`app/learning.py`](app/learning.py) (`shared_learning`, registry name `shared-learning`); Agno's own machine adds entity memory on top of the same pair. That machine is registered, so anything Platform Builder builds can join the same self by name — and joining is the only option there is: profile and memory rows are keyed by user id alone (`user_profile_<user_id>`, `memories_<user_id>`), never by component, so on one database no component gets a private self. `db` and `model` are declared on the machine on purpose: the framework injects them into a shared machine only when unset, so leaving them None would let whichever component runs first bind its own permanently for every sharer.
+- `app.settings.default_model()` returns `OpenAIResponses(id="gpt-5.6")` — bump the model in one place.
+- `app.registry.registry` exposes the safe Studio registry Platform Builder can use: Agno docs MCP, web search, a send-scoped Slack toolkit (when `SLACK_BOT_TOKEN` is set), media generation (images + text-to-speech on the platform's existing OpenAI key, returned as run artifacts that persist in Postgres), file generation (JSON/CSV/TXT/HTML/code as downloadable run artifacts; PDF and DOCX are deliberately off — a base64 binary does not compress in the Postgres run row and rides inline on every session read, while the text formats compress ~100x and HTML covers formatted documents at text cost), structured ask-the-user questions (HITL — the run pauses and resumes like Platform Builder's archive gate), a calculator, a deterministic step-function library for built workflows (JSON/CSV/URL shaping and file packaging — [`app/functions.py`](app/functions.py)), the shared `shared-notes` notebook as a scoped `FileSystem` toolkit (`shared_notes` — read, append, list, search, check_lines; no write-over, move, or delete, so a built agent contributes to the team's notes without retiring a colleague's, and keeps its own working files in a directory named after it — on the same 20MB namespace budget Agno uses, so a built agent that fills it stops Agno filing too; raise `max_namespace_bytes` in `app/notes.py` if the platform needs more), the platform's one knowledge base ([`app/knowledge.py`](app/knowledge.py), `shared-knowledge` — empty until a human loads it through the UI's Knowledge page), the platform's per-user self as a named learning machine (`shared-learning` — `list_learning` shows it, `learning_name` wires it), the default model, the shared DB, and the platform-manager reference agent. At boot the framework discovers every OS-registered component into the live registry, so each component's own wiring shows up in the list tools too (`studio`, Agno's `filesystem` notes and `studio_runners` dispatch toolkit, the `agentos` ops toolkit, Platform Engineer's `workspace` read tools, and the deployment-check functions) — discovered tools are **not buildable**: the Studio's palette policy refuses wiring them into new components (`tool_not_allowed`), so the route to new capability is always a reviewed code change to the registry. The same control-plane guard refuses composing the Agno team or platform-builder itself into a build; the other reference agents stay composable, and every registered component is a valid schedule target — though the Agno team is a poor one now that it can pause for a human (see the Agno section).
+- **Big tool results are offloaded, not carried — on the four platform agents only.** They do long back-and-forth work over big payloads (source files, metrics, registry listings, web pages); a new agent does not get this by default, and `create-agent` leaves it out on purpose. All four share the one `ResultStore` in [`app/offload.py`](app/offload.py): a tool result past 16,000 characters is written to a per-session file store and the transcript keeps a preview plus a `result_id`, with `search_result` and `read_result` to go back for the rest. Lossless, no model call on the write path, every read back capped. The framework injects its own usage instruction, so no component prompt mentions it. **The TTL is the part to keep deliberate** — the default is no expiry and the sweeper only runs when one is set, so a platform doing daily web fetches would grow the store forever; ours expires payloads after seven days. Two consequences: offloading and `compress_tool_results` refuse to run together (compression rewrites the messages holding the envelopes), and eval runs leave tool-result rows the teardown does not sweep — they are session-scoped, not shared state, and they expire on their own.
+- Built workflows branch on **CEL** expressions: the Studio routes any non-identifier string to Common Expression Language, so a `Condition`, `Router`, or `Loop` end-condition composed at runtime is written as `previous_step_content == ""` or `current_iteration >= max_iterations` rather than needing a registry function per predicate. The `cel-python` pin is what makes it work; without it every condition silently evaluates False and every loop runs to `max_iterations`. Step functions in `app/functions.py` signal failure by returning text prefixed `Error: ` (a raise costs four identical retries and then kills the run), so `previous_step_content.startsWith("Error: ")` is the branch for a step that could not do its job.
+- Scheduler enabled by default (`scheduler=True`); `app/schedules.py` registers schedules from the lifespan. Deployment check runs daily **on** by default — set `ENABLE_DEPLOY_CHECK=False` to disable it. The run-evals schedule is always registered but ships **disabled** (it uses model calls) — flip it on from the AgentOS UI when you want scheduled eval runs.
+- Slack interface lights up automatically when both `SLACK_BOT_TOKEN` and `SLACK_SIGNING_SECRET` are set.
+- MCP server on by default (`mcp_server=True`) at `/mcp` — see [MCP interface](#mcp-interface).
+- MCP OAuth lights up when `MCP_CONNECT_SECRET` is set (built-in authorization server) — how claude.ai and ChatGPT (web) connect; see [MCP interface](#mcp-interface).
+- **REST user isolation is off by default.** `AgentOS(authorization=...)` ships without an `authorization_config`, so `user_isolation` stays False and any holder of `sessions:read` — every PAT `uvx agno connect` mints included — reads sessions and memories platform-wide. That is deliberate for an operator-facing template, where the point is that Platform Manager can see everything; turn it on with `AuthorizationConfig(user_isolation=True)` when the platform serves people who should not read each other. It does not change the *self*: profile and memory rows stay keyed per user either way.
+- JWT auth on whenever `RUNTIME_ENV` is anything but `dev` (so production deploys, which default to `prd`, are gated by default).
 
-- **Database**: PostgreSQL + pgvector for sessions, memory, knowledge
-- **Model**: `app.settings.default_model()` returns `OpenAIResponses(id="gpt-5.6")`
-- **Learning**: All four reference components wire the LearningMachine's per-user profile and memory stores — one human, one self across every agent. The machine in `app/learning.py` is registered as `shared-learning`.
-
-## Registry (`app/registry.py`)
-
-The safe Studio registry Platform Builder can use. **Buildable tools**:
-- `agno_docs` — Agno documentation MCP
-- `parallel_tools` — web search and fetch (Parallel SDK or keyless MCP)
-- `shared_notes` — scoped FileSystem (read, append, list, search, check_lines)
-- `openai_tools` — image and speech generation
-- `file_generation` — JSON/CSV/TXT/HTML/code as downloadable artifacts
-- `user_feedback_tools` — structured ask-the-user questions (HITL)
-- `calculator` — arithmetic operations
-
-**Discovered but not buildable**: `studio`, `filesystem`, `agentos`, `studio_runners`, `workspace`, deployment-check functions. The route to new capability is always a reviewed code change to the registry.
-
-## Tool Result Offloading
-
-Big tool results are offloaded on the four platform agents only. The `ResultStore` in `app/offload.py` writes results past 16,000 chars to a per-session file store. The transcript keeps a preview plus `result_id`; use `search_result` and `read_result` to retrieve. 7-day TTL.
-
-## CEL Expressions
-
-Built workflows branch on CEL (Common Expression Language). The `cel-python` pin enables it. Examples:
-- `previous_step_content == ""` — empty result check
-- `current_iteration >= max_iterations` — loop bound
-- `previous_step_content.startsWith("Error: ")` — step failure branch
-
-## Key Flags
-
-- `scheduler=True` — enabled by default
-- `mcp_server=True` — `/mcp` endpoint on
-- `authorization=True` — JWT auth when `RUNTIME_ENV != "dev"`
-- `user_isolation=False` — off by default (operator template)

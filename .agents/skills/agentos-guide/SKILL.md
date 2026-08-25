@@ -11,15 +11,15 @@ This skill provides detailed documentation about this AgentOS platform. Read the
 
 | Topic | File | When to read |
 |-------|------|--------------|
-| Architecture overview | `refs/architecture.md` | Understanding the platform structure, registry, shared resources |
-| Agno team | `refs/agno.md` | How the front door team works, learning, notes, entities |
-| Platform Builder | `refs/platform-builder.md` | Runtime agent building via Studio |
-| Platform Manager | `refs/platform-manager.md` | Ops toolkit, metrics, diagnostics |
-| Platform Engineer | `refs/platform-engineer.md` | Source lens, workspace tools |
-| MCP interface | `refs/mcp-interface.md` | /mcp endpoint, OAuth, HITL, tools |
-| Scheduler | `refs/scheduler.md` | Cron jobs, deployment-check, run-evals |
-| Environment variables | `refs/env-vars.md` | All env var configuration |
-| Slack interface | `refs/slack.md` | Bot setup, routing, identity |
+| Architecture | `refs/architecture.md` | Platform structure, registry, shared resources, offloading, CEL |
+| Agno team | `refs/agno.md` | Team lead, learning, notes, entities, identity, HITL |
+| Platform agents | `refs/platform-agents.md` | Builder, Manager, Engineer — all three agents |
+| Interfaces | `refs/interfaces.md` | MCP endpoint, OAuth, Slack, connecting clients |
+| Configuration | `refs/configuration.md` | Environment variables, scheduler, cron jobs |
+| Development | `refs/development.md` | Local setup, hot-reload, format/validate, common tasks |
+| Conventions | `refs/conventions.md` | Agent pattern, database patterns |
+| Evals | `refs/evals.md` | Eval suite, hooks, tags |
+| Portable core | `refs/portable-core.md` | Deploy family concept, portable vs AWS-specific |
 
 ## Instructions
 
