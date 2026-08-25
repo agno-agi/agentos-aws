@@ -152,22 +152,27 @@ def get_slowest_tools(limit: int = 5, hours: int = 24) -> str:
             limit=limit,
         )
         if not tools:
-            return json.dumps({
-                "window_hours": hours,
-                "slowest_tools": [],
-                "note": f"No tool calls recorded in the last {hours} hours.",
-            })
+            return json.dumps(
+                {
+                    "window_hours": hours,
+                    "slowest_tools": [],
+                    "note": f"No tool calls recorded in the last {hours} hours.",
+                }
+            )
         # Format durations as seconds for readability
         for tool in tools:
             for key in ("avg_duration_ms", "p95_duration_ms", "max_duration_ms"):
                 if tool.get(key) is not None:
                     tool[key.replace("_ms", "_s")] = round(tool[key] / 1000, 2)
                     del tool[key]
-        return json.dumps({
-            "window_hours": hours,
-            "total_distinct_tools": total,
-            "slowest_tools": tools,
-        }, default=str)
+        return json.dumps(
+            {
+                "window_hours": hours,
+                "total_distinct_tools": total,
+                "slowest_tools": tools,
+            },
+            default=str,
+        )
     except NotImplementedError:
         return json.dumps({"error": "Span statistics are not supported by this database"})
     except Exception as e:
