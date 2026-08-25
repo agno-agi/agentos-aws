@@ -139,13 +139,21 @@ If you run non-interactively or skip the prompt, you can sync environment variab
 
 ### 4. Register your production AgentOS to MCP clients
 
-Re-run `uvx agno connect`, this time pointed at your deployed domain, to connect Claude Code, Claude Desktop, Codex, and Cursor to your production platform:
+Re-run `uvx agno connect`, this time pointed at your deployed domain, to register your production MCP endpoint:
 
 ```sh
 uvx agno connect --url https://<your-service-url>
 ```
 
-For **claude.ai and ChatGPT (web)**: add `https://<your-service-url>/mcp` as a custom connector in the chat app's connector settings. Leave the form's optional OAuth fields (client ID / client secret) empty. Click **Connect** and, on the consent page, enter the `MCP_CONNECT_SECRET` that `up.sh` generated during deploy (saved in `.env.production`).
+Then **restart Claude Code** (or run `/mcp` inside a session) so it picks up the new server. Because production uses OAuth, complete the one-time sign-in:
+
+```sh
+claude mcp login agentos
+```
+
+A browser opens, you enter the `MCP_CONNECT_SECRET` (from `.env.production`), and the CLI captures the token. After that, the connection is permanent.
+
+For **claude.ai and ChatGPT (web)**: add `https://<your-service-url>/mcp` as a custom connector. Leave OAuth fields empty, click **Connect**, and enter the `MCP_CONNECT_SECRET` on the consent page.
 
 ### 5. Verify
 
