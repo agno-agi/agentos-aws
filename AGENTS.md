@@ -6,6 +6,25 @@ This file is the source of truth for any agent (Claude Code, Codex, others) work
 
 **AgentOS: the agent platform that builds itself.** AgentOS is an agent server built on the [Agno framework](https://docs.agno.com) that turns your agents into a production API attaching to any client: **REST API** for programmatic use, **chat interfaces** for humans (Slack is wired in; WhatsApp/Telegram/Discord mirror the same pattern), and **MCP** at `/mcp` for AI apps (claude.ai, ChatGPT, Cursor, Claude Code) — which work *through* the platform, not just on it. The platform grows through two lanes. **Lane 1: coding agents change the source** — eight coding-agent skills cover platform setup, the full agent development lifecycle, and the production deploy, governed by git. **Lane 2: the platform builds at runtime** — Platform Builder composes agents, teams, and workflows from a safe registry of reviewed blocks, governed by the Studio catalog (drafts, publish, versions, archive/restore). [`app/registry.py`](app/registry.py) is the membrane between the lanes: every capability a built component can carry is declared there by a reviewed code change, and the builder composes but never expands it. Three platform agents run the show — Platform Builder (builds at runtime), Platform Manager (watches the runtime), Platform Engineer (reads the source) — and **Agno**, the team that fronts them: the platform speaking for itself, the one name everybody tags in ("Agno, what's happening with radar?" — "Agno, build me an agent for this"). It holds the thread — people, projects, decisions, living notes — learns how each user works, and answers with the state of play from Slack, claude.ai, ChatGPT, or any MCP client, with everything built at runtime one runner call away. Postgres (pgvector) handles persistence for sessions, memory, and knowledge. Runs locally via Docker; this template deploys to AWS (ECS Express Mode + RDS) with a single script and is the AWS sibling of the `agentos-*` deployment family — see [Portable core vs. deploy layer](#portable-core-vs-deploy-layer).
 
+> **Terminology collision** — This repo uses terms that also exist in Claude Code. Always clarify before acting:
+> - **Workflow**: Agno workflow (`workflows/*.py`) or Claude Code workflow (`.claude/workflows/`)?
+> - **Team**: Agno team (`teams/*.py`, multi-agent) or Claude Code team (collaboration/sharing)?
+> - **Task**: Claude Code task tracking (TaskCreate) or Agno background job/run?
+> - **Agent**: Agno agent (`agents/*.py`) or Claude Code subagent (Agent tool)?
+> - **Session**: Agno session (agent conversation in DB) or Claude Code session (this terminal)?
+> - **Memory**: Agno LearningMachine (per-user profile/memory) or Claude Code auto-memory?
+> - **Tools**: Agno toolkit (`agno.tools.*`) or MCP tools for Claude Code?
+> - **Schedule**: Agno scheduler (`app/schedules.py`) or Claude Code CronCreate?
+> - **Knowledge**: Agno Knowledge (RAG/vector DB) or general info?
+> - **Run**: Agno run (agent/workflow execution) or run a shell command?
+> - **Hook**: Agno lifecycle hooks (`on_agent_start`) or Claude Code/Codex hooks (`.claude/hooks/`)?
+> - **Storage**: Agno agent storage (DB state) or local file storage?
+> - **Builder**: Platform Builder agent (`agents/builder.py`) or Agno Agent Builder (UI)?
+> - **Subagent**: Claude Code Agent tool subagent or Codex subagent?
+> - **Model**: Agno model config (`app.settings.default_model()`) or Claude Code model override?
+>
+> When user says "create/build/add/check" any of these, ask which they mean.
+
 ## Architecture
 
 ```
