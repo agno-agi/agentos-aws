@@ -9,28 +9,9 @@
 
 Local smoke check: `./scripts/mcp_check.sh` — handshake, an **asserted** tool count (it fails when the count is not 8, rather than printing it for a human to notice), and one quick tool-free `run_agent` call through `/mcp` (finishes in seconds; pass your own question as an argument), executed inside the container. When `/mcp` is auth-gated (OAuth on, or prd JWT), it retries with a short-lived probe service account that it mints and deletes itself. To register the endpoint, run `uvx agno connect` (auto-detects Claude Code / Claude Desktop / Codex / Cursor and verifies with a real handshake); the manual fallback for Claude Code is `claude mcp add --transport http agentos http://localhost:8000/mcp`.
 
-
 ## Slack
 
 Set `SLACK_BOT_TOKEN` and `SLACK_SIGNING_SECRET` and restart. The default wiring in `app/main.py` routes Slack messages to the `agno` team, so the platform lives where the team already talks — and because Agno leads Platform Builder, Platform Manager, and Platform Engineer, "build me an agent", "is anything failing?", and "how does X work?" all work right there in the thread. Each sender keeps their private profile and memory (identity is per-sender; sessions are thread-scoped — a new top-level mention starts a fresh session, replies within that thread share it) while notes and entities are shared. Change the `team=` arg to point at another component. One migration note: threads started on a pre-3.0 platform key their sessions to the old `chief` id, which a run under `agno` won't resume — start a fresh thread after upgrading rather than replying to an old one. Entities and per-user profiles/memories carry over untouched; shared notes do not — 2.8 filed them under the `brain` namespace and 3.0 reads `shared-notes`, so notes worth keeping need a one-off copy between the two namespaces (the `fs.agno_fs` table in Postgres). See the [agno Slack interface docs](https://docs.agno.com/agent-os/interfaces/overview) for the Slack-side app setup.
 
 For Discord, Telegram, WhatsApp, and custom UIs, mirror the Slack conditional pattern with the relevant agno interface — see [agno interfaces overview](https://docs.agno.com/agent-os/interfaces/overview).
 
-
-## Connecting MCP Clients to Production
-
-After AWS deploy, register your production MCP endpoint:
-
-```sh
-uvx agno connect --url https://<your-service-url>
-```
-
-Then **restart Claude Code** (or run `/mcp` inside a session). Because production uses OAuth, complete the one-time sign-in:
-
-```sh
-claude mcp login agentos
-```
-
-A browser opens, you enter the `MCP_CONNECT_SECRET` (from `.env.production`), and the CLI captures the token. After that, the connection is permanent.
-
-For **claude.ai and ChatGPT (web)**: add `https://<your-service-url>/mcp` as a custom connector. Leave OAuth fields empty, click **Connect**, and enter the `MCP_CONNECT_SECRET` on the consent page.
