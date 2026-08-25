@@ -4,7 +4,7 @@ Platform Manager
 """
 
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
 from agno.agent import Agent
@@ -130,6 +130,50 @@ async def run_deployment_check() -> str:
     return json.dumps(payload, default=str)
 
 
+def get_slowest_tools(limit: int = 5, hours: int = 24) -> str:
+    """Get the slowest tool calls in the specified time window.
+
+    Args:
+        limit: Number of tools to return, slowest first. Clamped to 1-20.
+        hours: How many hours to look back. Clamped to 1-168 (1 week).
+
+    Returns:
+        JSON with the slowest tools by average duration, including call counts and latency stats.
+    """
+    limit = max(1, min(limit, 20))
+    hours = max(1, min(hours, 168))
+    start_time = datetime.now(tz=UTC) - timedelta(hours=hours)
+    try:
+        tools, total = _db.get_span_stats(
+            span_type="TOOL",
+            start_time=start_time,
+            sort_by="avg_duration_ms",
+            sort_order="desc",
+            limit=limit,
+        )
+        if not tools:
+            return json.dumps({
+                "window_hours": hours,
+                "slowest_tools": [],
+                "note": f"No tool calls recorded in the last {hours} hours.",
+            })
+        # Format durations as seconds for readability
+        for tool in tools:
+            for key in ("avg_duration_ms", "p95_duration_ms", "max_duration_ms"):
+                if tool.get(key) is not None:
+                    tool[key.replace("_ms", "_s")] = round(tool[key] / 1000, 2)
+                    del tool[key]
+        return json.dumps({
+            "window_hours": hours,
+            "total_distinct_tools": total,
+            "slowest_tools": tools,
+        }, default=str)
+    except NotImplementedError:
+        return json.dumps({"error": "Span statistics are not supported by this database"})
+    except Exception as e:
+        return json.dumps({"error": f"Failed to get slowest tools: {e}"})
+
+
 INSTRUCTIONS = """\
 You are Platform Manager: you watch and explain what this AgentOS is doing, and recommend what to do next.
 You are read-only: never claim to change code, components, schedules, or data (your profile and memory tools record the
@@ -150,6 +194,7 @@ What you watch:
   means nothing has been built at runtime — never that the platform has no components. For what is registered
   in code, hand off to Platform Engineer.
 - This template's deployment check: get_deployment_check_report and run_deployment_check.
+- Slowest tool calls: get_slowest_tools for latency hotspots.
 
 How you diagnose:
 - A read-only check is yours to run; run_deployment_check is one.
@@ -185,6 +230,7 @@ platform_manager = Agent(
         AgentOSTools(db=_db),
         get_deployment_check_report,
         run_deployment_check,
+        get_slowest_tools,
     ],
     instructions=INSTRUCTIONS,
     # Identity fallback for unauthenticated runs (dev MCP, evals).

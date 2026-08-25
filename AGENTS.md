@@ -1,370 +1,92 @@
-# AgentOS — AWS template
+# AgentOS — AWS Template
 
-This file is the source of truth for any agent (Claude Code, Codex, others) working in this repo. `CLAUDE.md` is a symlink to this file — edit one, both update.
+AgentOS: the agent platform that builds itself. Built on [Agno](https://docs.agno.com), deployed to AWS ECS Express Mode.
 
-## Project Overview
+## Tech Stack
 
-**AgentOS: the agent platform that builds itself.** AgentOS is an agent server built on the [Agno framework](https://docs.agno.com) that turns your agents into a production API attaching to any client: **REST API** for programmatic use, **chat interfaces** for humans (Slack is wired in; WhatsApp/Telegram/Discord mirror the same pattern), and **MCP** at `/mcp` for AI apps (claude.ai, ChatGPT, Cursor, Claude Code) — which work *through* the platform, not just on it. The platform grows through two lanes. **Lane 1: coding agents change the source** — eight coding-agent skills cover platform setup, the full agent development lifecycle, and the production deploy, governed by git. **Lane 2: the platform builds at runtime** — Platform Builder composes agents, teams, and workflows from a safe registry of reviewed blocks, governed by the Studio catalog (drafts, publish, versions, archive/restore). [`app/registry.py`](app/registry.py) is the membrane between the lanes: every capability a built component can carry is declared there by a reviewed code change, and the builder composes but never expands it. Three platform agents run the show — Platform Builder (builds at runtime), Platform Manager (watches the runtime), Platform Engineer (reads the source) — and **Agno**, the team that fronts them: the platform speaking for itself, the one name everybody tags in ("Agno, what's happening with radar?" — "Agno, build me an agent for this"). It holds the thread — people, projects, decisions, living notes — learns how each user works, and answers with the state of play from Slack, claude.ai, ChatGPT, or any MCP client, with everything built at runtime one runner call away. Postgres (pgvector) handles persistence for sessions, memory, and knowledge. Runs locally via Docker; this template deploys to AWS (ECS Express Mode + RDS) with a single script and is the AWS sibling of the `agentos-*` deployment family — see [Portable core vs. deploy layer](#portable-core-vs-deploy-layer).
+- **Framework**: Agno 3.0 (`agno[os,mcp,slack,pgvector,psycopg,csv,excel,docx,pdf,website]`)
+- **Model**: `gpt-5.6` via `app.settings.default_model()`
+- **Database**: PostgreSQL 17 + pgvector
+- **Deploy**: AWS ECS Express Mode (`scripts/aws/`)
+
+## Commands
+
+```bash
+# Local development
+docker compose up -d --build     # Start platform
+./scripts/mcp_check.sh           # Verify MCP endpoint (8 tools)
+
+# Code quality (run from host, needs .venv)
+source .venv/bin/activate
+./scripts/format.sh              # ruff format + import sort
+./scripts/validate.sh            # ruff check + mypy
+
+# Evals (run inside container — Python 3.14 pydantic compat)
+docker exec agentos-api python -m evals --tag smoke
+
+# Deploy to AWS
+./scripts/aws/up.sh              # First deploy (ECR + RDS + ECS Express)
+./scripts/aws/redeploy.sh        # Push changes
+./scripts/aws/env-sync.sh        # Sync env vars to Secrets Manager
+./scripts/aws/down.sh            # Teardown (confirms first)
+```
 
 ## Architecture
 
 ```
 AgentOS  (app/main.py)
-├── Agno             (teams/lead.py)      — the team (front door): LearningMachine + notes + web tools + ask_user + studio_runners,
-│                                           members = the three agents below; runs Studio-built components on demand
-├── Platform Builder (agents/builder.py)  — lane 2: Agno docs MCP + StudioTools over the safe registry; builds end published
-├── Platform Manager (agents/manager.py)  — runtime lens: AgentOSTools read-only ops toolkit + deployment-check tools
-├── Platform Engineer (agents/engineer.py) — source lens: read-only workspace tools (read/list/search) over the repo
-├── DeployCheck      (workflows/deployment_check.py) — deterministic readiness workflow
-└── RunEvals         (workflows/run_evals.py) — opt-in eval suite workflow
+├── Agno             (teams/lead.py)       — front door team; routes to members, runs built components
+├── Platform Builder (agents/builder.py)   — builds agents/teams/workflows via StudioTools
+├── Platform Manager (agents/manager.py)   — read-only ops: metrics, runs, schedules, diagnostics
+├── Platform Engineer (agents/engineer.py) — source lens: read/list/search over the repo
+├── DeployCheck      (workflows/deployment_check.py)
+└── RunEvals         (workflows/run_evals.py)
 ```
-
-Shared:
-- PostgreSQL + pgvector for sessions, memory, knowledge.
-- All four reference components (the Agno team and the three agents) wire the LearningMachine's per-user profile and memory stores over the shared DB — one human, one self across every agent. Entities and notes stay Agno's. The three agents carry the one declaration in [`app/learning.py`](app/learning.py) (`shared_learning`, registry name `shared-learning`); Agno's own machine adds entity memory on top of the same pair. That machine is registered, so anything Platform Builder builds can join the same self by name — and joining is the only option there is: profile and memory rows are keyed by user id alone (`user_profile_<user_id>`, `memories_<user_id>`), never by component, so on one database no component gets a private self. `db` and `model` are declared on the machine on purpose: the framework injects them into a shared machine only when unset, so leaving them None would let whichever component runs first bind its own permanently for every sharer.
-- `app.settings.default_model()` returns `OpenAIResponses(id="gpt-5.6")` — bump the model in one place.
-- `app.registry.registry` exposes the safe Studio registry Platform Builder can use: Agno docs MCP, web search, a send-scoped Slack toolkit (when `SLACK_BOT_TOKEN` is set), media generation (images + text-to-speech on the platform's existing OpenAI key, returned as run artifacts that persist in Postgres), file generation (JSON/CSV/TXT/HTML/code as downloadable run artifacts; PDF and DOCX are deliberately off — a base64 binary does not compress in the Postgres run row and rides inline on every session read, while the text formats compress ~100x and HTML covers formatted documents at text cost), structured ask-the-user questions (HITL — the run pauses and resumes like Platform Builder's archive gate), a calculator, a deterministic step-function library for built workflows (JSON/CSV/URL shaping and file packaging — [`app/functions.py`](app/functions.py)), the shared `shared-notes` notebook as a scoped `FileSystem` toolkit (`shared_notes` — read, append, list, search, check_lines; no write-over, move, or delete, so a built agent contributes to the team's notes without retiring a colleague's, and keeps its own working files in a directory named after it — on the same 20MB namespace budget Agno uses, so a built agent that fills it stops Agno filing too; raise `max_namespace_bytes` in `app/notes.py` if the platform needs more), the platform's one knowledge base ([`app/knowledge.py`](app/knowledge.py), `shared-knowledge` — empty until a human loads it through the UI's Knowledge page), the platform's per-user self as a named learning machine (`shared-learning` — `list_learning` shows it, `learning_name` wires it), the default model, the shared DB, and the platform-manager reference agent. At boot the framework discovers every OS-registered component into the live registry, so each component's own wiring shows up in the list tools too (`studio`, Agno's `filesystem` notes and `studio_runners` dispatch toolkit, the `agentos` ops toolkit, Platform Engineer's `workspace` read tools, and the deployment-check functions) — discovered tools are **not buildable**: the Studio's palette policy refuses wiring them into new components (`tool_not_allowed`), so the route to new capability is always a reviewed code change to the registry. The same control-plane guard refuses composing the Agno team or platform-builder itself into a build; the other reference agents stay composable, and every registered component is a valid schedule target — though the Agno team is a poor one now that it can pause for a human (see the Agno section).
-- **Big tool results are offloaded, not carried — on the four platform agents only.** They do long back-and-forth work over big payloads (source files, metrics, registry listings, web pages); a new agent does not get this by default, and `create-agent` leaves it out on purpose. All four share the one `ResultStore` in [`app/offload.py`](app/offload.py): a tool result past 16,000 characters is written to a per-session file store and the transcript keeps a preview plus a `result_id`, with `search_result` and `read_result` to go back for the rest. Lossless, no model call on the write path, every read back capped. The framework injects its own usage instruction, so no component prompt mentions it. **The TTL is the part to keep deliberate** — the default is no expiry and the sweeper only runs when one is set, so a platform doing daily web fetches would grow the store forever; ours expires payloads after seven days. Two consequences: offloading and `compress_tool_results` refuse to run together (compression rewrites the messages holding the envelopes), and eval runs leave tool-result rows the teardown does not sweep — they are session-scoped, not shared state, and they expire on their own.
-- Built workflows branch on **CEL** expressions: the Studio routes any non-identifier string to Common Expression Language, so a `Condition`, `Router`, or `Loop` end-condition composed at runtime is written as `previous_step_content == ""` or `current_iteration >= max_iterations` rather than needing a registry function per predicate. The `cel-python` pin is what makes it work; without it every condition silently evaluates False and every loop runs to `max_iterations`. Step functions in `app/functions.py` signal failure by returning text prefixed `Error: ` (a raise costs four identical retries and then kills the run), so `previous_step_content.startsWith("Error: ")` is the branch for a step that could not do its job.
-- Scheduler enabled by default (`scheduler=True`); `app/schedules.py` registers schedules from the lifespan. Deployment check runs daily **on** by default — set `ENABLE_DEPLOY_CHECK=False` to disable it. The run-evals schedule is always registered but ships **disabled** (it uses model calls) — flip it on from the AgentOS UI when you want scheduled eval runs.
-- Slack interface lights up automatically when both `SLACK_BOT_TOKEN` and `SLACK_SIGNING_SECRET` are set.
-- MCP server on by default (`mcp_server=True`) at `/mcp` — see [MCP interface](#mcp-interface).
-- MCP OAuth lights up when `MCP_CONNECT_SECRET` is set (built-in authorization server) — how claude.ai and ChatGPT (web) connect; see [MCP interface](#mcp-interface).
-- **REST user isolation is off by default.** `AgentOS(authorization=...)` ships without an `authorization_config`, so `user_isolation` stays False and any holder of `sessions:read` — every PAT `uvx agno connect` mints included — reads sessions and memories platform-wide. That is deliberate for an operator-facing template, where the point is that Platform Manager can see everything; turn it on with `AuthorizationConfig(user_isolation=True)` when the platform serves people who should not read each other. It does not change the *self*: profile and memory rows stay keyed per user either way.
-- JWT auth on whenever `RUNTIME_ENV` is anything but `dev` (so production deploys, which default to `prd`, are gated by default).
 
 ## Key Files
 
 | File | Purpose |
 |------|---------|
-| [`app/main.py`](app/main.py) | AgentOS entrypoint — lifespan hook, conditional Slack, conditional MCP OAuth, JWT gate. |
-| [`app/settings.py`](app/settings.py) | `default_model()` factory. |
-| [`app/registry.py`](app/registry.py) | Safe Studio registry of building blocks for Platform Builder and built components — the membrane between the two lanes; see the Shared bullet above for the inventory. |
-| [`app/learning.py`](app/learning.py) | `shared_learning` — the per-user profile/memory machine the three platform agents carry and the registry offers to built components under the name `shared-learning`. |
-| [`app/knowledge.py`](app/knowledge.py) | `shared_knowledge` — the one PgVector base, registry name `shared-knowledge`. Ships empty; the AgentOS UI's Knowledge page is the load path. |
-| [`app/offload.py`](app/offload.py) | `result_store` — one `ResultStore`, 7-day TTL, carried by all four reference components. Big tool results become searchable stored files instead of context. |
-| [`app/notes.py`](app/notes.py) | The shared `shared-notes` notebook, declared once: Agno mounts the full toolkit, the registry offers built components the scoped `shared_notes` toolkit (read, append, list, search, check_lines). |
-| [`app/functions.py`](app/functions.py) | Deterministic step functions for Studio-built workflows — each takes the runtime's `StepInput` and returns text or a downloadable file artifact, no model calls. |
-| [`app/config.yaml`](app/config.yaml) | UI manifest per component (keyed by `id`): description + quick prompts. |
-| [`teams/lead.py`](teams/lead.py) | Agno — the platform speaking for itself, and the front door: a `Team` with LearningMachine (profile, memory, entities in agentic mode) + FileSystem notes + web tools + `ask_user` (UserFeedbackTools) + the `studio_runners` dispatch toolkit (StudioRunnerTools) on the leader, and the three platform agents as members; runs every Studio-built component on demand — and, under `include_all_components=True`, every code-defined agent registered in `app/main.py`, so an agent a coding agent writes is reachable by name from the one front door. Code-defined teams are admitted too, this team included, so Agno can run Agno; `self_dispatch="once"` holds that to one level in code — the caller joins the lineage it hands the child, so the child can never re-enter, and the runner's cycle guard and `max_dispatch_depth` (default 2) refuse anything deeper. The Slack default. |
-| [`agents/builder.py`](agents/builder.py) | Platform Builder — creates, edits, publishes, and schedules agents, teams, and workflows through StudioTools; builds end published, and archive/delete pause for HITL confirmation. Wires the shared per-user profile/memory stores. |
-| [`agents/manager.py`](agents/manager.py) | Platform Manager — the runtime lens: agno's `AgentOSTools` read-only ops toolkit + deployment-check reports with an on-demand diagnostic run. Wires the shared per-user profile/memory stores. |
-| [`agents/engineer.py`](agents/engineer.py) | Platform Engineer — the source lens: read-only workspace tools over the repo (read/list/search), answers grounded in real paths; owns the onboarding tour and the coding-agent skill routing. Wires the shared per-user profile/memory stores. |
-| [`workflows/deployment_check.py`](workflows/deployment_check.py) | Reference workflow — a deterministic `Step` that checks DB, auth, the OpenAI key, scheduler URL, MCP reachability, Slack config, component imports, registry names, schedule state, and poller liveness; imported into `app/main.py` and passed to `AgentOS(workflows=[...])`. |
-| [`workflows/run_evals.py`](workflows/run_evals.py) | Optional workflow — runs a tagged subset of the eval suite and returns a compact report. Its daily schedule ships disabled — enable it from the AgentOS UI. |
-| [`app/schedules.py`](app/schedules.py) | `register_schedules()` — cron registration, called from the lifespan (idempotent, fail-soft). |
-| [`db/session.py`](db/session.py) | `get_postgres_db()`, `create_knowledge()`. |
-| [`db/url.py`](db/url.py) | Builds the database URL from env. |
-| [`evals/cases.py`](evals/cases.py) | Eval cases (each is a `Case` with optional judge + reliability checks). |
-| [`evals/hooks.py`](evals/hooks.py) | Setup/teardown machinery behind the cases — snapshot-diff sweeps with their refusal guards. |
-| [`evals/__main__.py`](evals/__main__.py) | `python -m evals` — thin entrypoint over agno's eval suite runner (`agno.eval.cli`). |
-| [`.agents/skills/`](.agents/skills/) | Dev-time **coding-agent workflows** (`setup-platform`, `create-agent`, `extend-agent`, `improve-agent`, `create-evals`, `eval-and-improve`, `review-and-improve`, `deploy-platform`) — slash commands coding agents run *on this repo*. `.claude/skills` is a committed symlink into it — see [Working with coding agents](#working-with-coding-agents). |
-| [`README.md`](README.md) | Public entry point — its Get Started prompt hands a coding agent to the `setup-platform` skill (clone to first agent). |
-| [`compose.yaml`](compose.yaml) | Docker Compose for local development. |
-| [`scripts/aws/`](scripts/aws/) | AWS deploy layer — `up.sh` provisions ECR + RDS Postgres 17 (private) + Secrets Manager + an ECS Express Mode service; `env-sync`/`redeploy`/`down` manage the lifecycle. |
-| [`scripts/aws/task-def.json`](scripts/aws/task-def.json) | Custom Express task definition — container `Main`, port 8000, 2 vCPU/4 GB, Secrets Manager injection; rendered by the scripts. |
+| `app/main.py` | AgentOS entrypoint |
+| `app/registry.py` | Safe Studio registry — the membrane between coding agents and runtime builds |
+| `app/learning.py` | `shared_learning` — per-user profile/memory across all agents |
+| `app/notes.py` | `shared-notes` notebook |
+| `teams/lead.py` | Agno team definition |
+| `agents/*.py` | Platform Builder, Manager, Engineer |
 
-## Development Setup
+## Skills
 
-### Local with Docker
+Coding-agent workflows in `.agents/skills/`. Claude loads on demand — only the description is scanned at startup.
 
-```bash
-cp example.env .env
-# Edit .env and set OPENAI_API_KEY
-
-docker compose up -d --build
-```
-
-The first boot opens MCP connections to `https://docs.agno.com/mcp` and — unless `PARALLEL_API_KEY` is set — `https://search.parallel.ai/mcp`. AgentOS connects them in its lifespan, so the API does not start if either host is unreachable; behind a proxy or firewall, allow both, or set `PARALLEL_API_KEY` to drop the second.
-
-`compose.yaml` sets `RUNTIME_ENV=dev`, `AGNO_DEBUG=True`, and `WAIT_FOR_DB=True` so JWT is off and the API blocks on the DB before serving. It runs uvicorn with a scoped `--reload` (watching `agents/`, `app/`, `db/`, `evals/`, `teams/`, `workflows/`), so code edits hot-reload in a second or two. Restart `agentos-api` after dependency or env changes, or whenever you want a guaranteed-clean state.
-
-### Format & Validate
-
-The format / validate / eval scripts run on the host, so they need a venv. Set one up once:
-
-```bash
-./scripts/venv_setup.sh
-source .venv/bin/activate
-```
-
-Then:
-
-```bash
-./scripts/format.sh     # ruff format + import sort
-./scripts/validate.sh   # ruff check + mypy (runs both, summarizes)
-```
-
-CI installs the same pinned `requirements.txt` and runs the same `scripts/validate.sh` — local and CI never drift.
-
-## Conventions
-
-### Agent pattern
-
-Every agent file has the same shape:
-
-```python
-"""
-<Title> Agent
-=============
-"""
-
-from agno.agent import Agent
-
-from app.settings import default_model
-from db import get_postgres_db
-
-INSTRUCTIONS = """\
-You are <Name>: <what the agent does, in one line>.
-
-How you speak:
-- <one rule per line>
-
-How you <work>:
-- <one rule per line; a sequence is a numbered list>\
-"""
-
-my_agent = Agent(
-    id="my-agent",
-    name="My Agent",
-    model=default_model(),
-    db=get_postgres_db(),
-    tools=[...],
-    instructions=INSTRUCTIONS,
-    add_datetime_to_context=True,
-    add_history_to_context=True,
-    num_history_runs=5,
-)
-```
-
-Three patterns to copy from:
-
-- **Learning team lead** — see [`teams/lead.py`](teams/lead.py). Agno is a `Team`: direct tools (the notes toolkit — the leader sees each tool individually) plus `learning=` (the LearningMachine attaches its stores' tools, guidance, and recall automatically), static reference members, and a **StudioRunnerTools** mount (`studio_runners`) that lists and runs every Studio-built component on demand. The same tools+learning shape works unchanged on a plain `Agent` when nothing needs delegating; use `learning=` whenever the component should accumulate durable state across sessions.
-- **Context provider** — see [`agents/engineer.py`](agents/engineer.py). A `WorkspaceContextProvider` scopes an agent to a source. Platform Engineer uses `mode=ContextMode.tools` — the read tools (`read_file`, `list_files`, `search_content`) mount directly, so the agent orchestrates its own multi-file reads and cites real paths. The default mode instead exposes one `query_<thing>` tool delegating to a sub-agent — best when collapsing many tools into one keeps the model focused.
-- **Studio builder** — see [`agents/builder.py`](agents/builder.py). The agent sees StudioTools, a safe `Registry`, Agno docs MCP, and a HITL gate on the consequential ops: create/edit/publish execute immediately (every mutation lands in the DB as a versioned draft or published component — inspectable, reversible, and inert until published), while archive_component, delete_version, and delete_schedule pause for human approval. Best when the user should create or refine components from the AgentOS UI, Slack, or an MCP frontend.
-
-### Database
-
-```python
-# Plain agent — sessions, memory, agentic memory live here
-from db import get_postgres_db
-agent_db = get_postgres_db()
-
-# Agent with a Knowledge base (RAG) — pass through `knowledge=`
-from db import create_knowledge
-my_kb = create_knowledge("My Knowledge", "my_vectors")
-```
-
-Knowledge bases use PgVector with `SearchType.hybrid` and `text-embedding-3-small`. Document contents go into `<table_name>_contents`.
-
-## Adding a new agent
-
-Two options:
-
-1. **Hand it to Claude Code** — run the `/create-agent` skill (or just ask to "create a new agent") in a Claude Code session pointed at this repo. Claude asks the user what the agent should do, generates the file, registers it, smoke-tests it. See [Working with coding agents](#working-with-coding-agents).
-2. **Do it manually** — create `agents/<slug>.py`, register in `app/main.py`, add its manifest entry (description + quick prompts) to `app/config.yaml`. The scoped uvicorn reload picks up the Python changes automatically, but not `app/config.yaml` — uvicorn's watcher includes `*.py` only, so a manifest edit needs an `agentos-api` restart, as do dependency and env changes.
-
-## Iterating on an agent
-
-Two recursive loops over the same agent. Use them together.
-
-- **`/extend-agent`** ([`.agents/skills/extend-agent`](.agents/skills/extend-agent/SKILL.md)) — **you drive.** Add a tool, add a capability, refine the prompt, fix a known bug. Claude is the Agno-aware pair-programmer (uses the `agno-docs` MCP for any toolkit research). Loop: change → smoke-test → "anything else?".
-- **`/improve-agent`** ([`.agents/skills/improve-agent`](.agents/skills/improve-agent/SKILL.md)) — **Claude drives.** Derives probes from the agent's `INSTRUCTIONS` and from real usage in the database (when the platform has any), judges, edits, re-runs — reflective self-improvement. No user input needed. Loop: mine → probe → judge → edit → re-probe.
-
-Use `/extend-agent` to *change* the agent; use `/improve-agent` to *harden* it against its stated intent. Most fixes from either loop are one sentence in `INSTRUCTIONS`.
-
-## Evals
-
-The eval suite lives in [`evals/`](evals/) and runs on agno's eval suite runner (`agno.eval`): the template declares `Case`s, agno runs them. Each case wraps agno's [`AgentAsJudgeEval`](https://docs.agno.com/evals/agent-as-judge) (LLM judge against a rubric, binary pass/fail) and/or [`ReliabilityEval`](https://docs.agno.com/evals/reliability) (tool-call assertion). Any case whose component can reach the ungated create/edit/publish Studio tools — anything probing `platform-builder`, and any `agno` team case whose prompt could plausibly delegate a build to it — must set the builder hooks (`**BUILDER_HOOKS` from `evals/hooks.py`) — setup records the Studio component ids, the schedule ids, and learning/note state before the case, and teardown hard-deletes any new rows afterwards, even on timeout. Likewise, any other case probing an agent with learning stores (`agno`, `platform-manager`, `platform-engineer`) must set the learning hooks (`**LEARNING_HOOKS`) — capture is ungated, so entities, memories, and notes really land in the shared stores, and the teardown removes the rows that appeared while the case ran. Two consequences worth knowing before you run the suite against stores people are using: a row that already existed is never deleted, but an edit *inside* one is never undone either; and a row someone else writes during the case window looks new to the diff and gets swept. Run the suite when you are the only writer, and give fixtures names no real team would have on file. As a backstop, the learning teardown refuses outright when a row missing from the snapshot was created *before* the snapshot was taken — proof the snapshot missed rows, and proof that holds at any platform size, which is what a count cannot do: `get_learnings` swallows a DB error into an empty list, and on a platform a few conversations old a count cap never fires while every profile, memory, and entity goes. A sweep of more than 25 learning rows (or more than 5 schedules) refuses on top of that, and a `cleanup:` error beats a silent mass delete. The template's own two schedules, `deployment-check` and `run-evals`, are spared by name on top of that — sweeping `run-evals` would quietly undo whoever enabled it — and when name and id evidence disagree (an empty snapshot with those names present), the teardown refuses rather than guessing. Cases carry tags:
-
-- `smoke` — fast checks that prove the template's self-driving surfaces still work.
-- `release` — broader checks for pre-release confidence.
-- `live` — current web/source checks that are useful but should not be deterministic release gates.
-
-Run with `python -m evals --tag smoke`, `python -m evals --tag release`, or `python -m evals --name <case>`. Add `--json-output out.json` when a workflow or coding agent needs machine-readable results. Results log to Postgres via `db=eval_db` so history is visible at os.agno.com.
-
-Two skills work this suite from opposite ends. To author coverage — especially for agents you build, which start with none — run [`/create-evals`](.agents/skills/create-evals/SKILL.md): it maps what an agent promises, mines real sessions from Postgres for scenarios, and writes audited cases into the marked user-cases section of `evals/cases.py`. To diagnose failures and fix in scope, run [`/eval-and-improve`](.agents/skills/eval-and-improve/SKILL.md).
-
-## Reviewing the repo
-
-Run the `/review-and-improve` skill ([`.agents/skills/review-and-improve`](.agents/skills/review-and-improve/SKILL.md)). A recurring sweep that diffs docs against code: every agent registered, every env var documented, every path in a doc still exists, every script behaves as advertised. Auto-fixes mechanical drift; flags anything bigger. Best run before a public-facing release or after a refactor.
-
-## Working with coding agents
-
-Dev-time **coding-agent workflows** live in [`.agents/skills/`](.agents/skills/) — the vendor-neutral home for coding-agent assets, mirroring how `CLAUDE.md` symlinks to `AGENTS.md`. `.claude/skills` is a committed symlink into it, so Claude Code picks the skills up on every clone with no setup step; other harnesses (Codex, Cursor, …) can symlink the same folder. (Windows needs developer mode or `core.symlinks=true` for the symlink to materialize.) Claude-specific config like `.claude/settings.json` stays a real file in `.claude/`.
-
-These workflows cover platform setup, the agent-development lifecycle, and the production deploy in this template:
-
-- **`/setup-platform`** — take a fresh clone to a running platform with a first agent live on it: Docker check, `.env`, boot, MCP proof, the AgentOS UI connect, a `create-agent` handoff, then a make-it-yours re-home into the user's own private repo (the template stays wired as `upstream` for updates). The README's Get Started prompt and the os.agno.com onboarding prompt both drive it.
-- **`/create-agent`** — scaffold a new agent: guided discovery or from a concrete idea → generate `agents/<slug>.py`, register it, smoke-test it live.
-- **`/extend-agent`** — you drive. Add a tool/source, refine `INSTRUCTIONS`, fix a known bug — and grow [`app/registry.py`](app/registry.py), which is the one route by which anything built at runtime gains a capability it did not have. Uses the `agno-docs` MCP for grounded toolkit research.
-- **`/improve-agent`** — Claude drives. Derives probes from the agent's `INSTRUCTIONS` and real usage in the database, judges, edits, re-runs. No user input needed.
-- **`/create-evals`** — author eval coverage for an agent: map its promises, mine real sessions from Postgres for scenarios, propose capabilities, write and audit `Case` entries. How a user's own agents join the suite.
-- **`/eval-and-improve`** — run the eval suite, diagnose failures, fix in scope until green.
-- **`/review-and-improve`** — repo-wide drift sweep (docs vs code vs config).
-- **`/deploy-platform`** — take the proven local platform to production with this repo's deploy scripts: preflight the CLI and account, deploy, walk the JWT key step, verify the live platform on its public URL, hand over redeploy/logs/teardown.
-
-Invoke a skill by name (`/extend-agent`) or just describe the task — Claude Code matches it from the skill's `description`.
-
-## Environment Variables
-
-| Variable | Required | Default | Description |
-|---|---|---|---|
-| `OPENAI_API_KEY` | yes | — | OpenAI key for models + embeddings. |
-| `RUNTIME_ENV` | no | `prd` | `dev` disables JWT. Compose sets this to `dev` for local — never put `dev` in an env file that `env-sync.sh` pushes to the task definition, or production serves unauthenticated. |
-| `JWT_VERIFICATION_KEY` | prd | — | Public key from os.agno.com. Required when `RUNTIME_ENV=prd` and `authorization=True`, unless `JWT_JWKS_FILE` is set. |
-| `JWT_JWKS_FILE` | prd | — | Path to a JWKS file; alternative to `JWT_VERIFICATION_KEY` for production JWT verification. |
-| `AGENTOS_URL` | no | `http://127.0.0.1:8000` | Scheduler base URL — cron triggers reach AgentOS over this. `scripts/aws/up.sh` sets it to the Express service URL (generated per service; up.sh reads it after create and rolls a correcting task-definition revision) and writes it back into your env file. Left at the localhost default in prod, scheduled jobs silently never fire. Also the public origin OAuth metadata derives from when `MCP_CONNECT_SECRET` is set. |
-| `MCP_CONNECT_SECRET` | no | — | If set (≥16 chars, e.g. `openssl rand -base64 32`), `/mcp` becomes its own OAuth 2.1 authorization server (built-in tier) so claude.ai and ChatGPT (web) can connect; connecting asks for this secret on a consent page. Requires `AGENTOS_URL`. PAT and JWT bearers keep working alongside. `scripts/aws/up.sh` auto-generates it into your env file on deploy and stores it in Secrets Manager. |
-| `AGENTOS_MCP_SIGNING_KEY` | no | — | Optional high-entropy signing-key material (≥32 chars) for OAuth tokens. Unset, a strong key is generated and persisted in the database. Rotating it invalidates outstanding tokens. |
-| `ENABLE_DEPLOY_CHECK` | no | `True` | The reference deployment-check cron (`app/schedules.py`) runs daily by default. This env var owns the schedule's toggle and re-asserts it on every boot, both directions — so flip the cron here, not in the UI. The workflow stays runnable on demand regardless. |
-| `EVALS_TAG` | no | `smoke` | Eval tag run by the run-evals workflow. |
-| `EVALS_CASE_TIMEOUT_SECONDS` | no | `90` | Default per-case timeout for run-evals runs; applies only to cases that don't set their own `timeout_seconds`. |
-| `EVALS_SUITE_TIMEOUT_SECONDS` | no | derived | Whole-suite timeout for run-evals runs; per-case timeouts are the granular limit. Unset, it is derived from the cases the tag actually selects (their ceilings plus hook margin), so adding a case never silently outgrows the budget. Set it to override. |
-| `PARALLEL_API_KEY` | no | — | Authenticates Agno's and the Studio registry's web search tools (Parallel SDK when set; keyless MCP fallback with a lower rate ceiling). |
-| `SLACK_BOT_TOKEN` | no | — | Bot token. Set with signing secret to enable the Slack interface. Also lights up the registry's send-only Slack toolkit (post + list channels), so built agents can be wired to post to Slack. |
-| `SLACK_SIGNING_SECRET` | no | — | Signing secret. Both it and the bot token must be set for the interface to load. |
-| `DB_HOST` / `DB_PORT` / `DB_USER` / `DB_PASS` / `DB_DATABASE` | no | matches compose | Postgres connection. |
-| `DB_DRIVER` | no | `postgresql+psycopg` | SQLAlchemy driver. |
-| `AGNO_DEBUG` | no | `False` | If `True`, agno emits verbose debug logs. Compose sets this for dev. |
-| `WAIT_FOR_DB` | no | `False` | If `True`, the entrypoint blocks on the DB before starting. Compose sets this. |
+| Skill | Purpose |
+|-------|---------|
+| `/setup-platform` | Fresh clone → running platform with first agent |
+| `/create-agent` | Scaffold a new code-defined agent |
+| `/extend-agent` | Add tools, refine prompt, fix bugs |
+| `/improve-agent` | Self-improvement loop from INSTRUCTIONS + real usage |
+| `/create-evals` | Author eval coverage for an agent |
+| `/eval-and-improve` | Run evals, diagnose failures, fix |
+| `/review-and-improve` | Repo-wide drift sweep (docs vs code) |
+| `/deploy-platform` | Deploy to AWS with JWT setup |
+| `/agentos-guide` | Deep dive: architecture, agents, MCP, registry |
 
 ## Ports
 
-- API: `8000`
-- Database: `5432`
+- **API**: 8000
+- **Database**: 5432
 
-## Scheduler
+## Quick Reference
 
-`scheduler=True` is on in [`app/main.py`](app/main.py). A schedule is a cron expression + an HTTP endpoint (a workflow or agent run); the poller fires due jobs in the background. Registration lives in [`app/schedules.py`](app/schedules.py)'s `register_schedules()`, called from the lifespan — idempotent (`if_exists="update"`, safe on every boot) and fail-soft (a bad schedule logs a warning rather than crashing startup).
+- **Registry**: `app/registry.py` — 7 buildable tools, discovered tools not buildable
+- **Env vars**: `example.env` → `.env`, set `OPENAI_API_KEY`
+- **MCP**: `/mcp` endpoint, 8 tools, OAuth via `MCP_CONNECT_SECRET`
+- **Slack**: Set `SLACK_BOT_TOKEN` + `SLACK_SIGNING_SECRET`, routes to Agno team
+- **Schedules**: `deployment-check` on by default, `run-evals` disabled
 
-**Reference examples.** [`workflows/deployment_check.py`](workflows/deployment_check.py) is a one-step, **deterministic** workflow — no LLM, no token cost — that returns a deployment readiness report. It checks DB connectivity and tables, JWT config, the OpenAI key, scheduler URL, MCP endpoint reachability, Slack env consistency, reference component imports, the registry names built components resolve by, schedule state, and whether the scheduler poller is actually firing. [`app/schedules.py`](app/schedules.py) registers a daily cron that hits its endpoint (`POST /workflows/deployment-check/runs`). Because it's deterministic and free, the cron runs **on** by default (daily at 13:00 UTC); disable it with `ENABLE_DEPLOY_CHECK=False` — the env var owns this toggle and re-asserts it on every boot, so a UI flip lasts only until the next restart.
+## Documentation
 
-[`workflows/run_evals.py`](workflows/run_evals.py) runs a tagged subset of the eval suite and returns a compact report. Its daily 14:00 UTC schedule is always registered but ships **disabled** because it uses model calls — enable it from the AgentOS UI (or `POST /schedules/{id}/enable`) to run the smoke-tagged cases daily. The enabled toggle is yours after that: boot-time registration refreshes the schedule's definition but never overrides it. Enable it with the Evals section's only-writer rule in mind: smoke includes learning-store cases whose teardown sweeps anything written to the shared stores during the case window, so a scheduled run while the team is talking to Agno can delete their filings — pick an hour nobody is, or leave the schedule off on a busy platform and run the suite deliberately instead.
+- [Agno docs](https://docs.agno.com)
+- [AgentOS introduction](https://docs.agno.com/agent-os/introduction)
+- [Agno tools/toolkits](https://docs.agno.com/tools/toolkits)
 
-To add your own: define a `Workflow` in `workflows/`, import it into [`app/main.py`](app/main.py) and add it to `AgentOS(workflows=[...])`, and register a schedule for it in `register_schedules()`. Other common uses: **maintenance** (purge old sessions, vacuum tables), **periodic re-evaluation** (run `python -m evals` weekly to catch regressions).
-
-See [agno scheduler docs](https://docs.agno.com/agent-os/scheduler) for the cron API.
-
-## Agno
-
-Agno ([`teams/lead.py`](teams/lead.py)) is this platform speaking for itself — the team lead and the one name everybody talks to. "Agno, we're going with PlanetScale over RDS." "Agno, have radar scan the week." From Slack, the AgentOS UI, or any MCP client: it takes what it's told, files it, connects the dots when someone asks what's happening, and puts the right doer on the asks. It speaks in first person about the platform because it *is* the platform: the agents, workflows, schedules, and memory are its own. The purpose in one line: **Agno holds the thread; everything else is a handoff.** The warmth is the surface; underneath, it runs on the framework's LearningMachine and FileSystem.
-
-That line is also the rule for growing Agno. A capability belongs on the leader only if it changes what Agno can hold or recall — and then it must claim a unique home under one-claim-one-home (a corpus competes with notes, so knowledge/RAG belongs on a built agent Agno dispatches to) — or if it is a doer, and a doer costs one routing line and one wiring flag (new chat interfaces are wiring, not capability: they route to the same team and cost the prompt nothing). Privileged platform mutations — archives, deletes, schedule toggles, approval decisions — never mount on the leader: Agno relays the pause, the human decides. And the persona is capture infrastructure, not decoration: a voice line earns its place by increasing what people tell Agno, or their trust in what it holds.
-
-As lead, Agno is a `Team`, not a plain agent. Its members are Platform Builder, Platform Manager, and Platform Engineer, and it carries a **StudioRunnerTools** mount (`studio_runners`: list and run for built agents, teams, and workflows) for everything built at runtime through the Studio. The runner resolves the component from the database at call time — current published config, as the current user, in a per-conversation sub-session — so an agent published seconds ago is runnable on the very next message, and the cost of dispatch stays one tool call however many things the team builds. Drafts never dispatch: a roster row still in draft is handed back to Platform Builder to publish, and Agno says so instead of faking a run. That puts the whole platform behind the one name people already talk to: "Agno, build me an agent that tracks AI news" reaches Platform Builder, "Agno, is anything failing?" reaches Platform Manager, "Agno, how does the MCP auth work?" reaches Platform Engineer, and "Agno, have radar scan the week" runs the agent the team built yesterday — from Slack included, since Slack routes to the team. Filing and recall never delegate: the brain stays on the leader. A member's confirmation gate (Platform Builder's archive/delete pauses) pauses the team run and resumes through the same approval surfaces as before — the framework persists paused member runs on the session regardless of storage flags, so the gate needs no special wiring (`store_member_responses` stays `False`: member runs always land as their own rows in the runs table, and `True` would only duplicate them into the team run row); a *built agent's* pause surfaces in the runner result as `status=PAUSED` with its requirements, which Agno relays rather than re-running. Three surfaces split the work: **notes** hold content (decisions with their reasoning, running documents — anything longer than a line), **entities** index the world (people, projects, systems: one-line current values, links, and a `note:` pointer to where the detail lives), and **profile/memory** hold the self (who each user is, how they like to work). The one-claim-one-home rule in its `INSTRUCTIONS` keeps those surfaces from duplicating each other. Agno also carries **web tools** (Parallel SDK when `PARALLEL_API_KEY` is set, keyless MCP otherwise): outside-world questions get searched and grounded, and processed pages are filed as **links plus a distilled takeaway — never pasted payloads**, because notes live in the database (1MB/file, 20MB/namespace caps) and the web can always be fetched again.
-
-Agno can also **ask**. `UserFeedbackTools` puts one `ask_user` tool on the leader: a structured question with two to four options, for the case where the answer changes what Agno would do and cannot be read from the entities, the notes, or the session. It earns its place under the growth rule because it increases what people tell Agno — an ambiguous "what's happening here?" becomes two named candidates to pick between rather than a paragraph of guesses. It is the same HITL machinery as Platform Builder's archive gate, so the run pauses and resumes through the AgentOS UI, Slack, or `continue_run` over MCP.
-
-**Anything carrying it becomes a poor schedule target**, the leader included: a scheduled run pauses at 09:00 with nobody to answer. That is the trade the platform accepts to have the capability, and it implies two components rather than one — an agent that asks questions is for interactive use, and scheduled work gets a separate agent built without the toolkit. Platform Builder is instructed to read a target's tools before scheduling and refuse one carrying `user_feedback_tools`, but that is a prompt rule rather than a code guard: probed on 3.0.0a5 it created the schedule anyway on the first attempt and refused on the second, and earlier probing caught it putting an agent whose only tool was `ask_user` on an enabled 15-minute cron. The failure is mild and visible — the run sits paused, one model call per fire, and `list_pending_approvals` on Platform Manager shows it — so treat the rule as a strong default, check pending approvals if a schedule looks idle, and do not schedule the Agno team.
-
-**The world is shared, the self is private.** Notes (`FileSystem` namespace `shared-notes` — files land in Postgres under the `fs` schema) and entities (namespace `global`) are shared by everyone on the platform; user profile and user memory are per-user (agentic mode, so their tools only exist when a run carries a user id). The self also spans agents: all three member agents wire the same per-user profile/memory stores — the one `shared_learning` machine in [`app/learning.py`](app/learning.py) — so what Agno learns about a user follows them to every reference agent. It spans lane 2 as well: that machine is registered under the name `shared-learning`, so a component Platform Builder builds can be wired to the same self and pick the thread up from there. Corrections supersede rather than accumulate — stating a new fact retires the contradicted one (a judged model call in the write path), and facts render with as-of dates.
-
-**Identity decides what stays private.** A run's identity always wins: Slack runs as the sender, production runs as the JWT `sub`, PATs as `sa:<name>`. `user_id="anonymous-user"` (on the Agno team and the three reference agents) is only the fallback for anonymous local runs (dev `/mcp`, evals) — without it they would silently lose the profile/memory tools. One caveat to know: the built-in MCP OAuth identifies the *connector registration*, not the person — claude.ai and ChatGPT connect as different `__oauth__:<client_id>` principals, so the same human gets separate private stores per app (shared notes and entities are unaffected). A JWT deployment is what gives one human one Agno across channels.
-
-Two implementation notes: the legacy `enable_agentic_memory` flag stays **off** on all four reference components — alongside learning stores it would register the legacy MemoryManager's `update_user_memory` tool, shadowing the learning store's tool of the same name. And eval cases that probe a learning-store agent must set the learning hooks (see [Evals](#evals)), and name their fixtures things no real team would have on file. The hooks diff on row identity, so they remove rows a case *created* but cannot undo an edit *inside* a row that already existed — a superseded fact, a replaced relationship, a rewritten note line. Distinctive names are what keep a case out of that path.
-
-## Platform Builder
-
-Platform Builder ([`agents/builder.py`](agents/builder.py)) is lane 2's engine — the agent that makes "builds itself" a thing the platform does rather than a thing you do to it. It carries `StudioTools` over the safe registry, the Agno docs MCP, and nothing else: everything it can hand a new component comes from [`app/registry.py`](app/registry.py), so the blast radius of a build is exactly the reviewed palette.
-
-**Builds come out published.** `create_agent`, `create_team`, and `create_workflow` all take `publish=true`, and that is the normal path: the create resolves every reference as it goes, so a bad tool, model, knowledge, or learning name fails the create instead of producing something broken and live. A team or workflow needs its members and steps published first. `publish_component` is reserved for promoting a draft the user asked to review — and there it is preceded by `validate_component`, which rebuilds the component against the live registry exactly as a run would, without dispatching it. That distinction matters because publishing checks nothing on its own: a team promoted with draft members fails on its first dispatch, not at publish.
-
-**Drafts, versions, archive, restore.** Every mutation lands in Postgres as a versioned row, inspectable and reversible, and inert until published. Create, edit, publish, and `set_current_version` execute immediately — they are additive or reversible. The three that discard state pause for a human: `archive_component`, `delete_version`, `delete_schedule`. That gate resolves in the AgentOS UI, from Slack's approve button, or over MCP through `continue_run`, so it is usable from every frontend rather than being a dead end outside the UI.
-
-**What it will not do.** It refuses unsafe capability before calling a tool — secret exfiltration, reading `.env`, unrestricted writes, shell — and it screens the instructions it writes, not only the tools it wires, because a component told to collect credentials is the same request in different clothes. Discovered toolkits are not buildable: the palette refuses them, so new capability always arrives as a reviewed change to the registry, which is what [`/extend-agent`](.agents/skills/extend-agent/SKILL.md) now covers. The same guard refuses composing the Agno team or Platform Builder itself into a build.
-
-**Scheduling.** It can schedule what it builds, always naming the cost of recurring model spend and how to turn it off. Schedule names are per-owner, so it edits its own and never repurposes one it did not create; the platform's own `deployment-check` and `run-evals` rows are owned by the code and invisible to it. It never schedules a component that can pause for a human, because nobody is there to answer.
-
-## Platform Manager
-
-The platform's ops surface is the Platform Manager agent ([`agents/manager.py`](agents/manager.py)) — read-only by design, and scoped to one lens: the runtime. It carries agno's `AgentOSTools` toolkit over Postgres (usage metrics, run and tool activity from traces, eval history, schedules and their run history, runtime-built components, pending approvals) plus this template's own deployment-check tools (reports — and running the check on demand when no report exists or the latest is stale), diagnoses issues from what those tools observed, and hands off fixes: source questions and code fixes route through Platform Engineer, component changes go to Platform Builder.
-
-Two of those tools answer the questions an operator asks first. `get_platform_metrics` is the ledger — runs, sessions, distinct users, token spend, and model mix per day. The numbers stay fresh without anyone clicking refresh: the DB layer recomputes metrics lazily on read (at most once a minute per process), and the refresh is self-limiting — dates already complete are skipped. `get_run_activity` is the stopwatch, aggregating the traces `tracing=True` already records into per-agent, per-team, and per-workflow run counts, latency (average, p95, slowest), and failures. Traces with no component id are endpoint-level (an `/mcp` call wrapping an agent run) and are reported under a separate `endpoint_level` key so they never double-count the run they wrap; when a list is capped, the payload's notes say so rather than passing a sample off as the whole picture. `get_tool_activity` narrows the stopwatch to spans: which tools are called most, which run slowest, and how model calls are behaving — names, durations, and statuses only, never conversation content. These arrive with agno's `AgentOSTools` toolkit — one line in the tools list — and the template adds only the deployment-check pair on top.
-
-Keep it read-only. Least privilege is the point: an ops surface that only reads can't misfire, needs no confirmation gates, and stays safe to expose from any frontend. Visibility is the one caveat: `AgentOSTools` reads Postgres directly, so REST endpoint scopes never apply to it — anyone who can chat with the agent sees platform-wide aggregates, and `list_pending_approvals` carries user, session, and tool identifiers. That is the toolkit's own guidance too: expose the agent to operators, and trim surfaces with the toolkit's enable flags for anything wider. **Diagnostics are the one sanctioned trigger**: Platform Manager may run observations that are deterministic, free, idempotent, and non-mutating — `run_deployment_check` qualifies (it re-points the same checks the daily cron runs, and the run persists so report history stays coherent); run-evals does not (model spend), and anything that writes platform state never does. The metrics refresh inside `get_platform_metrics` sits just inside that line and is worth stating precisely: it is deterministic, free, and idempotent, and the only rows it writes are aggregates recomputed from sessions the platform already has — it derives, it does not mutate. The LearningMachine's per-user profile and memory writes sit outside the platform-state boundary altogether — they record who the user is, never what the platform does. Nothing that changes source state qualifies on those grounds. Schedule enable/disable and trigger stay out for the same reason: agno exposes them (`POST /schedules/{id}/enable`, `/disable`, `/trigger`), so the boundary here is a deliberate choice, not a missing capability. Approvals follow the same split — `list_pending_approvals` reads the queue; deciding one stays with the human. Mutations belong with coding agents through git, or behind Platform Builder's archive gate — which an MCP client can approve in-chat via `continue_run`.
-
-## Platform Engineer
-
-Platform Engineer ([`agents/engineer.py`](agents/engineer.py)) is the source lens — it knows how the platform is *built* the way Platform Manager knows what it is *doing*. It mounts the workspace's read tools directly (`read_file`, `list_files`, `search_content`, repo-rooted, read-only). Whole-file reads are capped at 50,000 lines / 4MB — high, because offloading rather than the cap is what protects the context now, and the cap's remaining job is to stay under the result store's own 8MB per-result limit. The workspace's exclude patterns **are** an access boundary as of agno 3.0.0a4 (agno#9730): an excluded path is refused by `read_file` and `search_content`, not merely hidden from `list_files`, so the framework's default pattern list is the real control. As of 3.0.0a5 that list covers the conventional credential files — private keys and keystores, `.ssh`/`.aws`/`.gnupg`, registry and host tokens, credential data files, cloud service accounts, Terraform inputs — and exempts the committed env templates, so `example.env` and `.env.example` read while `.env` and `.env.production` do not. **Exclusion is by filename, so it cannot catch a credential pasted into an ordinarily-named file** — and there the prompt rule is not enough either: `read_file` puts the content in the tool result, and `search_content` can surface a matching snippet with no agent decision involved at all, before the model can refuse. Either way it lands in the run row and is served back by `/sessions/{id}/runs`. Keep secrets in files the patterns name. It answers wiring questions grounded in real paths: which agents are registered, how the MCP auth conditional works, what an env var controls, what a skill does. It owns the onboarding tour ("teach me how to use this AgentOS") because the tour is a repo read, and it owns the coding-agent skill routing: a source change is a handoff to a coding agent through [`.agents/skills/`](.agents/skills/), and Platform Engineer names the matching skill and writes the brief from what it actually read.
-
-Read-only is the current scope, not the destination. The lane-1 endgame is an engineer that executes scoped source changes itself — branch, verify gate, PR — and grows the registry when Platform Builder hits a missing capability; a git-history lens (log/diff/show) is the nearer step, deferred for now because deployed images ship without `.git`, so a history lens would work locally and silently return nothing in production (with a GitHub token, the API is the production-safe alternative). Until then the boundary is crisp: Platform Engineer reads and routes; coding agents write through git; nothing on the platform mutates source.
-
-## MCP interface
-
-`mcp_server=True` in [`app/main.py`](app/main.py) mounts an MCP server (streamable HTTP) at `/mcp`, on the same port as the REST API. This is the platform's second interface: chat apps (claude.ai and ChatGPT connectors) and coding agents (Claude Code, Cursor) drive the agents, teams, and workflows through it. The README's setup prompt hands a fresh machine to the [`setup-platform`](.agents/skills/setup-platform/SKILL.md) skill, which takes it from clone to first agent — proving `/mcp` end to end along the way (`scripts/mcp_check.sh`).
-
-- **Tools are generic, not per-agent — eight of them.** `get_agentos_config` (how clients discover valid ids), `run_agent(agent_id, message, session_id)`, `run_team`, `run_workflow`, `continue_run`, `cancel_run`, `get_sessions`, and `get_session_runs`. Agno is a team, so clients reach it via `run_team(team_id="agno", ...)` — the config tool makes that discoverable. Sessions are read-only over MCP and there is no memory CRUD. `run_agent`/`run_team` return a trimmed ToolResult: `content[0].text` is the plain answer, and `structuredContent` carries `{run_id, session_id, status}`. The server needs the `fastmcp` package, which ships with the pinned `agno` dependency.
-- **Auth mirrors the REST API, with first-class service accounts.** Dev (`RUNTIME_ENV=dev`) is open (unless MCP OAuth is on — next bullet). In prd the same middleware protects `/mcp`; clients send `Authorization: Bearer <token>`. Two token types work side by side: JWTs minted at os.agno.com, and opaque service-account PATs (`agno_pat_…`) minted via `POST /service-accounts` (the route auto-enables once a db is set). A PAT's default scopes — `agents:run`, `teams:run`, `workflows:run`, `sessions:read`, `config:read` — cover all eight tools, and it attributes as `sa:<name>`. The verified token subject overrides any caller-supplied `user_id`, so identity cannot be spoofed. `uvx agno connect` mints a PAT and registers `/mcp` in Claude Code / Claude Desktop / Codex / Cursor.
-- **OAuth for the web chat apps — set `MCP_CONNECT_SECRET` and `/mcp` becomes its own OAuth 2.1 authorization server.** claude.ai and ChatGPT (web) connectors authenticate over OAuth only, so this is what lets them connect to a secured platform: paste `https://<domain>/mcp` as a custom connector (the form's optional client ID/secret fields stay empty — DCR registers the app), then approve the consent page with the connect secret. The built-in server (`AgentOSBuiltinAuth(url=agentos_url, secret=MCP_CONNECT_SECRET)` in [`app/main.py`](app/main.py), mirroring the Slack conditional) stores clients, single-use codes, and rotating refresh tokens hashed in Postgres; DCR is public-client + PKCE only; tokenless calls get the `401` + `WWW-Authenticate` challenge connectors use for discovery, and `/info`'s `mcp.oauth` block carries the OAuth discovery details (`auth_mode` keeps describing the REST plane). Existing PAT/JWT bearers keep working on the same endpoint (`MultiAuth`), so enabling OAuth never breaks `agno connect` clients. Gates `/mcp` in dev too — the OAuth flow needs a stable public origin (`AGENTOS_URL`).
-- **HITL pauses resume over MCP via `continue_run`.** A paused `run_agent` returns immediately with `status=PAUSED` and unresolved `requirements` dicts in `structuredContent`; the client **echoes each requirement back unchanged** with `confirmation: true` added, through `continue_run(run_id, agent_id, session_id, requirements)`. So a confirmation gate is no longer a dead end from chat frontends — this is what lets Platform Builder keep the archive/delete gate usable over MCP. **Echo the requirement; never send a bare `{"confirmation": true}`.** The match is made on `tool_execution.tool_call_id` alone, so a payload that carries no `tool_call_id` matches nothing — and on the *agent* path an unmatched payload does not error: it consumes the pause and records a rejection, reporting `status=COMPLETED` with `isError` false, so the client is told the run finished while the approval it sent was silently inverted. The pause cannot be retried afterwards. (The *team* path refuses correctly with a 409 and stays paused; the divergence is filed upstream as `agent-hitl-unmatched-requirement`.) Over REST the field names differ by plane: the agent route takes `tools` (an array of `ToolExecution`, echoed with `confirmed: true`), the team route takes `requirements` (an array of `RunRequirement`, echoed with `confirmation: true`) — sending the wrong one is ignored with a 200 and the run stays paused.
-
-Local smoke check: `./scripts/mcp_check.sh` — handshake, an **asserted** tool count (it fails when the count is not 8, rather than printing it for a human to notice), and one quick tool-free `run_agent` call through `/mcp` (finishes in seconds; pass your own question as an argument), executed inside the container. When `/mcp` is auth-gated (OAuth on, or prd JWT), it retries with a short-lived probe service account that it mints and deletes itself. To register the endpoint, run `uvx agno connect` (auto-detects Claude Code / Claude Desktop / Codex / Cursor and verifies with a real handshake); the manual fallback for Claude Code is `claude mcp add --transport http agentos http://localhost:8000/mcp`.
-
-## Slack
-
-Set `SLACK_BOT_TOKEN` and `SLACK_SIGNING_SECRET` and restart. The default wiring in `app/main.py` routes Slack messages to the `agno` team, so the platform lives where the team already talks — and because Agno leads Platform Builder, Platform Manager, and Platform Engineer, "build me an agent", "is anything failing?", and "how does X work?" all work right there in the thread. Each sender keeps their private profile and memory (identity is per-sender; sessions are thread-scoped — a new top-level mention starts a fresh session, replies within that thread share it) while notes and entities are shared. Change the `team=` arg to point at another component. One migration note: threads started on a pre-3.0 platform key their sessions to the old `chief` id, which a run under `agno` won't resume — start a fresh thread after upgrading rather than replying to an old one. Entities and per-user profiles/memories carry over untouched; shared notes do not — 2.8 filed them under the `brain` namespace and 3.0 reads `shared-notes`, so notes worth keeping need a one-off copy between the two namespaces (the `fs.agno_fs` table in Postgres). See the [agno Slack interface docs](https://docs.agno.com/agent-os/interfaces/overview) for the Slack-side app setup.
-
-For Discord, Telegram, WhatsApp, and custom UIs, mirror the Slack conditional pattern with the relevant agno interface — see [agno interfaces overview](https://docs.agno.com/agent-os/interfaces/overview).
-
-## Portable core vs. deploy layer
-
-This repo is the AWS sibling of the `agentos-*` deployment family ([agentos-railway](https://github.com/agno-agi/agentos-railway) is the reference). Everything that defines the platform is **portable core — identical across the family**: `agents/`, `app/`, `db/`, `evals/`, `teams/`, `workflows/`, the MCP server wiring, the interfaces, and the coding-agent skills in `.agents/skills/`. `Dockerfile`, `compose.yaml`, and `scripts/entrypoint.sh` are shared local-dev/runtime infra, also not deployment-specific.
-
-The **AWS-specific deploy layer** — what a sibling template swaps out — is exactly:
-
-- [`scripts/aws/`](scripts/aws/) (`up.sh`, `env-sync.sh`, `redeploy.sh`, `down.sh`, `task-def.json`)
-- the "Deploying to AWS" prose here and in the README
-
-When editing, keep that boundary crisp: platform behavior belongs in the core, AWS mechanics belong in the deploy layer, and nothing in the core should import from or depend on it.
-
-## Deploying to AWS (ECS Express Mode)
-
-Hand it to a coding agent — the [`/deploy-platform`](.agents/skills/deploy-platform/SKILL.md) skill conducts this whole flow (preflight, deploy, the JWT key step, live verification) — or drive it yourself:
-
-```bash
-./scripts/aws/up.sh        # provision ECR + RDS + Secrets Manager + the Express service
-./scripts/aws/env-sync.sh  # sync .env.production (default) or a named env file
-./scripts/aws/redeploy.sh  # rebuild + push the image, roll the service
-./scripts/aws/down.sh      # tear everything down (asks for confirmation; --yes to skip)
-```
-
-The heavy lifting is **ECS Express Mode**: one `aws ecs create-express-gateway-service` call provisions the Fargate service, ALB + HTTPS certificate, target groups, security groups, autoscaling, CloudWatch logs and alarms, and a public HTTPS URL (`https://ag-<id>.ecs.<region>.on.aws` — generated per service, not derived from the service name) — up to 25 Express services share one ALB. `up.sh` pins the scaling target to exactly **one task** (min 1 keeps the in-process scheduler alive; max 1 because scaled-out replicas would each run a scheduler, double-firing every cron — the same reason the Fly sibling deploys `--ha=false`). If you ever want scale-out, make the scheduler single-instance first. The URL is generated, so `up.sh` reads the real one from `describe-express-gateway-service` once the service exists and rolls a task-definition revision that bakes it into `AGENTOS_URL`, so the scheduler is reachable in prod out of the box. It also generates `MCP_CONNECT_SECRET` into the env file when missing (stored in Secrets Manager, riding the same correcting revision) and prints it in the closing summary, so chat apps can connect over OAuth from the first deploy — see [MCP interface](#mcp-interface). `up.sh` then waits until the gateway actually answers (first-create ALB + certificate + DNS provisioning runs ~10-25 minutes) and self-heals the known first-run wedge: with freshly created IAM roles, Express's async infrastructure calls can be denied before the role policies propagate, and ECS never retries — the script detects the never-answering endpoint and recreates the service once; `aws ecs monitor-express-gateway-service` is the diagnostic if anything else stalls. Region comes from `AWS_REGION` (default `us-east-1`).
-
-We ship a custom task definition ([`scripts/aws/task-def.json`](scripts/aws/task-def.json)): container named `Main`, port mapping named `main` on 8000, 2 vCPU / 4 GB (Express's own default would be just 0.25 vCPU / 512 MiB), and Secrets Manager injection for every secret-shaped variable — so sizing and secret handling stay ours while Express owns the infrastructure. Around it, `up.sh` provisions the ECR repo and RDS PostgreSQL 17 (db.t4g.micro, private-only — no public address, port 5432 open only inside the VPC); pgvector comes from the app's own `CREATE EXTENSION IF NOT EXISTS` on first boot. The ALB health check hits `/health`, which AgentOS serves unauthenticated by design even in prd, so health checks pass with JWT auth on.
-
-JWT auth is on by default. Once the service URL exists, `up.sh` pauses if `JWT_VERIFICATION_KEY` or `JWT_JWKS_FILE` is missing, so you can connect the OS at os.agno.com (Connect OS → Live with the service URL, name it `Live AgentOS`, and flip Token-Based Authorization (JWT) on right on the connect panel — Settings → OS & Security is the fallback if you connected without it), paste the full PEM into the prompt, and let the script save it to the env file. Live AgentOS Connections are a paid feature; use `PLATFORM30` to get 1 month off. The PEM lands in Secrets Manager and rides into a fresh task-definition revision before traffic is served. If you skip the prompt or run non-interactively, add the key later and run `./scripts/aws/env-sync.sh`.
-
-`up.sh` needs an AWS CLI v2 recent enough to have the Express Mode verbs — it preflights `aws ecs create-express-gateway-service help` and tells you to upgrade (e.g. `brew upgrade awscli`) until that works. This deploy layer fully replaces the old agno-infra approach: no `infra/` directory, no `ag infra up/down` — plain `aws` CLI scripts a coding agent can read, run, and fix mid-failure. Teams that prefer real IaC can drive Express Mode from CloudFormation or Terraform instead.
-
-## Common Tasks
-
-```bash
-# Add a dependency
-# 1. Edit pyproject.toml
-./scripts/generate_requirements.sh   # keeps existing pins; add `upgrade` to refresh every pin
-docker compose up -d --build
-
-# Bump agno (alpha, rc, and final releases are the same flow)
-# 1. Edit the agno pin in pyproject.toml
-./scripts/generate_requirements.sh agnoctl   # agno follows the pin; agnoctl must be named — agno only floors it at the previous release
-docker compose up -d --build
-./scripts/validate.sh && python -m evals --tag smoke
-
-# Build a multi-arch image (maintainer-only)
-./scripts/build_image.sh
-
-# Tail service logs
-aws logs tail /ecs/agent-os --follow --region <region>
-```
-
-## Documentation Links
-
-- [Agno docs](https://docs.agno.com) — full framework reference.
-- [Agno LLM-friendly docs](https://docs.agno.com/llms.txt) — concise overview, good for fetching.
-- [AgentOS introduction](https://docs.agno.com/agent-os/introduction).
-- [Agno tools / toolkits](https://docs.agno.com/tools/toolkits) — 100+ integrations.
-- [Agno model providers](https://docs.agno.com/models) — OpenAI, Anthropic, Google, Ollama, Bedrock, Azure, etc.
-- [Agno teams](https://docs.agno.com/teams/overview) — multi-agent routing/coordination.
-- [Agno workflows](https://docs.agno.com/workflows/overview) — deterministic step-by-step pipelines.
-- [Agno interfaces](https://docs.agno.com/agent-os/interfaces/overview) — Slack, Discord, Telegram, WhatsApp, custom UIs.
+For detailed architecture, agent internals, MCP interface, and configuration: run `/agentos-guide`.

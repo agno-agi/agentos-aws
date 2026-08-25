@@ -1,6 +1,13 @@
 manifest:
   # --- Agents ---
 
+  quote-of-the-day:
+    description: "Shares inspirational quotes that resonate with what you're going through."
+    quick_prompts:
+      - "Give me a quote to start the day"
+      - "I need something grounding — it's been a hard week"
+      - "What would a Stoic say about dealing with uncertainty?"
+
   platform-builder:
     description: "Creates agents, teams, workflows, and schedules using the AgentOS Studio."
     quick_prompts:
@@ -14,6 +21,7 @@ manifest:
       - "Is the platform healthy right now?"
       - "How many runs and tokens over the last 7 days?"
       - "Which agent is slowest, and is anything failing?"
+      - "Show me the top 5 slowest tool calls in the last 24 hours"
 
   platform-engineer:
     description: "Answers codebase questions: reads the source code, explains the wiring, and generates handoffs for your coding agent."
