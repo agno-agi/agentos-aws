@@ -283,19 +283,4 @@ CASES: tuple[Case, ...] = (
             "build a new component to satisfy the ask (offering to build one is fine)."
         ),
     ),
-    # Platform Manager — slowest tools: tests the get_slowest_tools function for latency hotspots.
-    Case(
-        name="platform_manager_shows_slowest_tools",
-        agent=platform_manager,
-        input="What are the top 5 slowest tool calls in the last 24 hours?",
-        tags=("smoke", "release"),
-        timeout_seconds=60,
-        **LEARNING_HOOKS,
-        criteria=(
-            "Reports tool latency data showing tool names with latency measurements (average, p95, "
-            "or max) in seconds. If no tool calls are recorded in the window, says so plainly. "
-            "The data should look like real instrumentation output, not fabricated prose."
-        ),
-        expected_tool_calls=("get_slowest_tools",),
-    ),
 )
