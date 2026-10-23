@@ -188,8 +188,10 @@ You'll need AWS CLI 2.28 or newer with ECS Express Mode support, configured AWS 
 [ -f .env.production ] || cp example.env .env.production
 ```
 
-Add `OPENAI_API_KEY` and any other model keys you use. Keep `RUNTIME_ENV=prd`
-or leave it unset. The scripts read `.env.production` before `.env`.
+Add `OPENAI_API_KEY` and any other model keys you use, such as `ANTHROPIC_API_KEY`
+or `CLAUDE_CODE_OAUTH_TOKEN` for Claude Engineer. Keep `RUNTIME_ENV=prd` or leave
+it unset. The scripts read `.env.production` before `.env`; credential-shaped keys
+land in Secrets Manager, the rest become plain environment variables.
 
 Set `AWS_REGION` in `.env.production` if you want a region other than `us-east-1`.
 
@@ -249,10 +251,12 @@ Deletes the ECS service, database, image repository, managed secrets and log gro
 ### Sandbox storage
 
 Local Docker sandbox instructions are in the [sandbox guide](docs/sandboxes.md).
-The production deployment does not provision sandbox checkpoint storage.
-Before enabling AWS AgentCore, configure persistent storage mounted at `/data`
-on the API service and give it AWS access. If your deployment cannot provide
-that mount, leave AgentCore disabled. Keep one API instance.
+The production deployment does not attach sandbox checkpoint storage. Before
+enabling AWS AgentCore, create an EFS file system with mount targets in the
+service's subnets, add it to [scripts/aws/task-def.json](scripts/aws/task-def.json)
+as a volume mounted at `/data` on the container, and grant the task's IAM role
+access to the AgentCore runtime (the container's own AWS identity; no keys in the
+env file). If you skip the mount, leave AgentCore disabled. Keep one API instance.
 
 ## Verify and develop
 
