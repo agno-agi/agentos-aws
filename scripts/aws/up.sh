@@ -15,7 +15,8 @@
 #        upgrade with e.g. `brew upgrade awscli` if it doesn't)
 #      - Credentials configured (`aws sts get-caller-identity` succeeds)
 #      - Docker running (the image is built locally and pushed to ECR)
-#      - OPENAI_API_KEY set in environment (or .env / .env.production)
+#      - OPENAI_API_KEY set in environment (or .env / .env.production);
+#        ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN there too for Claude Engineer
 #
 #    Provisions: ECR repo, RDS PostgreSQL 17 (private, pgvector via the
 #    app's CREATE EXTENSION), Secrets Manager secrets, IAM roles, and one
@@ -232,10 +233,12 @@ if ! command -v docker &> /dev/null || ! docker info &> /dev/null; then
     exit 1
 fi
 
-if [[ -z "$OPENAI_API_KEY" ]]; then
+if [[ -z "$OPENAI_API_KEY" || "$OPENAI_API_KEY" == "sk-***" ]]; then
     echo "OPENAI_API_KEY not set. Add to .env (or .env.production) or export it."
     exit 1
 fi
+# example.env ships the Claude key as a placeholder; never deploy it as a value.
+[[ "$ANTHROPIC_API_KEY" == "sk-***" ]] && ANTHROPIC_API_KEY=""
 
 REGION="${AWS_REGION:-us-east-1}"
 SERVICE_NAME="agent-os"
@@ -392,6 +395,15 @@ fi
 if [[ -n "$SLACK_SIGNING_SECRET" ]]; then
     ARN="$(put_secret agentos/slack-signing-secret "$SLACK_SIGNING_SECRET")"
     EXTRA_SECRETS="${EXTRA_SECRETS}, { \"name\": \"SLACK_SIGNING_SECRET\", \"valueFrom\": \"${ARN}\" }"
+fi
+# Claude Engineer authenticates with one of these two; Codex uses OPENAI_API_KEY.
+if [[ -n "$ANTHROPIC_API_KEY" ]]; then
+    ARN="$(put_secret agentos/anthropic-api-key "$ANTHROPIC_API_KEY")"
+    EXTRA_SECRETS="${EXTRA_SECRETS}, { \"name\": \"ANTHROPIC_API_KEY\", \"valueFrom\": \"${ARN}\" }"
+fi
+if [[ -n "$CLAUDE_CODE_OAUTH_TOKEN" ]]; then
+    ARN="$(put_secret agentos/claude-code-oauth-token "$CLAUDE_CODE_OAUTH_TOKEN")"
+    EXTRA_SECRETS="${EXTRA_SECRETS}, { \"name\": \"CLAUDE_CODE_OAUTH_TOKEN\", \"valueFrom\": \"${ARN}\" }"
 fi
 echo -e "${DIM}Secrets stored under agentos/*${NC}"
 
