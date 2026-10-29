@@ -42,8 +42,8 @@ If `.env` does not exist, `cp example.env .env`, then set `OPENAI_API_KEY`:
 - Otherwise open `.env` in their editor (`cursor`, `code`) and ask them to paste it. Never open a terminal editor from your shell — it hangs the session.
 
 Coding agents are opt-in; see [harness setup](../../../docs/harnesses.md).
-If enabled, Claude Engineer needs its own credentials. If the user chooses Claude Code OAuth, remove
-the `ANTHROPIC_API_KEY` placeholder and set `CLAUDE_CODE_OAUTH_TOKEN` instead. The API
+If enabled, Claude Engineer needs its own credentials: set `ANTHROPIC_API_KEY`, or
+`CLAUDE_CODE_OAUTH_TOKEN` for Claude Code OAuth. The API
 container does not inherit a host Claude login. If Claude credentials are unavailable,
 report that Claude Engineer cannot run; do not present API startup as verification of it.
 
@@ -53,8 +53,9 @@ For standard development, `docker compose up -d --build`, then poll http://local
 
 For sandbox development, follow the [sandbox setup guide](../../../docs/harnesses.md#local-docker-sandbox).
 Set `SANDBOX_ENABLED = True` and `REPOSITORY` in `app/sandbox.py`, build the sandbox
-image, and use the same Compose API. Compose selects `SANDBOX_PROVIDER=docker` and
-mounts the daemon socket into the API only; do not mount it into coding sandboxes.
+image, and add `COMPOSE_FILE=compose.yaml:compose.sandbox.yaml` to `.env`. Compose
+selects `SANDBOX_PROVIDER=docker`, and `compose.sandbox.yaml` mounts the daemon socket
+into the API only; do not mount it into coding sandboxes.
 The pinned framework admits sandbox HTTP runs through the durable PostgreSQL queue.
 Configuration and API startup do not prove execution: verify a coding agent HTTP run and
 Company Task acceptance/completion separately. Keep the Product repository Source aligned

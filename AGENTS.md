@@ -45,7 +45,7 @@ workflows in `.agents/skills/`; `.claude/skills` links to that directory.
 - `db/`: cached OS database and distinct knowledge content adapters.
 - `evals/`: application cases and the Agno eval CLI entrypoint.
 - `scripts/`: local setup, validation and builds. Deployment files: `scripts/aws/`.
-- `compose.yaml`: local PostgreSQL and development API. `Dockerfile`: shared API and sandbox dependencies.
+- `compose.yaml`: local PostgreSQL and development API; `compose.sandbox.yaml` adds the Docker socket for local sandboxes. `Dockerfile`: shared API and sandbox dependencies.
 
 ## Local development
 
@@ -125,8 +125,8 @@ settings. Private checkout falls back to GH_TOKEN. GitHub CLI and its Git creden
 are installed in the shared image; supply tokens at runtime only.
 
 For local Docker sandboxes, keep the API in Compose using the [sandbox setup guide](docs/harnesses.md#local-docker-sandbox).
-The API image includes the Docker CLI; Compose mounts the daemon socket into the API
-only. Sandbox containers must not receive that socket. This grants the API daemon access
+The API image includes the Docker CLI; `compose.sandbox.yaml` mounts the daemon socket
+into the API only when added through `COMPOSE_FILE`. Sandbox containers must not receive that socket. This grants the API daemon access
 and is intended for trusted local development.
 Build the sandbox with `docker build --target sandbox --load -t agno-sandbox:local .`.
 Development checkpoints use the absolute project `tmp/checkpoints` path and survive

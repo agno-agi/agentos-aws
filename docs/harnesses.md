@@ -58,17 +58,21 @@ Configure `.env` using the [local setup instructions](../README.md#run-locally).
 From the repository root, build the sandbox image and start the platform:
 
 ```sh
+echo 'COMPOSE_FILE=compose.yaml:compose.sandbox.yaml' >> .env
 docker build --target sandbox --load -t agno-sandbox:local .
 docker compose up -d --build
 ./scripts/mcp_check.sh
 ```
 
-The first command builds and loads the Dockerfile's `sandbox` stage. The API runs in
-Compose and starts separate containers from that image for coding sessions.
+`COMPOSE_FILE` adds [compose.sandbox.yaml](../compose.sandbox.yaml) to every
+`docker compose` command in this directory. It mounts your Docker daemon socket into
+the API. The build command builds and loads the Dockerfile's `sandbox` stage. The API
+runs in Compose and starts separate containers from that image for coding sessions.
 Rebuild the sandbox image when its dependencies or Dockerfile change.
 
-Compose gives the API access to your Docker daemon through its socket. Use this for
-trusted local development; coding sandboxes receive no socket. Checkpoints persist
+The socket gives the API, and a coding agent running without a sandbox, control of
+your Docker daemon. Use it only for trusted local development with sandboxes enabled;
+coding sandboxes receive no socket. Checkpoints persist
 in the project's `tmp/checkpoints` folder while those files remain.
 
 Model credentials are forwarded automatically. For private repositories and publishing,

@@ -419,6 +419,12 @@ PLACEHOLDER_URL="https://${SERVICE_NAME}.ecs.${REGION}.on.aws"
 AGENTOS_URL_VALUE="${AGENTOS_URL:-$PLACEHOLDER_URL}"
 
 EXTRA_ENV=', { "name": "SANDBOX_PROVIDER", "value": "agentcore" }'
+# app/sandbox.py requires these at import once sandboxes are enabled.
+for key in AGENTCORE_RUNTIME_ARN AGENTCORE_CHECKPOINT_BUCKET AGENTCORE_CHECKPOINT_PREFIX; do
+    if [[ -n "${!key:-}" ]]; then
+        EXTRA_ENV="${EXTRA_ENV}, { \"name\": \"${key}\", \"value\": \"${!key}\" }"
+    fi
+done
 [[ -n "$RUNTIME_ENV" ]] && EXTRA_ENV="${EXTRA_ENV}, { \"name\": \"RUNTIME_ENV\", \"value\": \"${RUNTIME_ENV}\" }"
 
 render_task_def() {

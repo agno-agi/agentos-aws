@@ -35,7 +35,7 @@ def sandbox_provider() -> Sandbox | None:
     raise ValueError("SANDBOX_PROVIDER must be 'docker' or 'agentcore'.")
 
 
-def docker_sandbox(env: Mapping[str, str] | None = None) -> DockerSandbox:
+def docker_sandbox(*, env: Mapping[str, str] | None = None) -> DockerSandbox:
     return DockerSandbox(
         image="agno-sandbox:local",
         network="isolated",
@@ -48,6 +48,7 @@ def docker_sandbox(env: Mapping[str, str] | None = None) -> DockerSandbox:
 def agentcore_sandbox(
     runtime_arn: str,
     checkpoint_bucket: str,
+    *,
     checkpoint_prefix: str = "agentos/checkpoints/",
     env: Mapping[str, str] | None = None,
 ) -> Sandbox:

@@ -183,9 +183,23 @@ ${line}"
     current_value="${current_value#\'}"
     current_value="${current_value%\'}"
 
-    if [[ "$current_key" == "SANDBOX_PROVIDER" ]]; then SANDBOX_PROVIDER_SET=1; fi
-
     case "$current_key" in
+        SANDBOX_PROVIDER)
+            # ECS has no Docker daemon, so only agentcore is valid there.
+            if [[ "$current_value" != "agentcore" ]]; then
+                echo -e "${DIM}  Skipping SANDBOX_PROVIDER=${current_value} (ECS uses agentcore)${NC}"
+                current_key=""
+                current_value=""
+                continue
+            fi
+            SANDBOX_PROVIDER_SET=1
+            ;;
+        COMPOSE_FILE)
+            echo -e "${DIM}  Skipping COMPOSE_FILE (local Compose setting)${NC}"
+            current_key=""
+            current_value=""
+            continue
+            ;;
         AWS_PROFILE)
             # Names a profile on this machine; meaningless inside the container.
             echo -e "${DIM}  Skipping AWS_PROFILE (host-only; give the service AWS credentials directly)${NC}"
