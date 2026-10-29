@@ -1,0 +1,7 @@
+# Local Docker sandbox: gives the API control of the host Docker daemon so it can
+# start sandbox containers. Use it only with SANDBOX_ENABLED = True, for trusted
+# local development. Add COMPOSE_FILE=compose.yaml:compose.sandbox.yaml to .env.
+services:
+  agentos-api:
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
