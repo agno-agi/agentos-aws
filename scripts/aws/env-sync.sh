@@ -104,7 +104,7 @@ put_secret() {
 # Keys that must live in Secrets Manager rather than plain task-def env vars.
 is_secret_key() {
     case "$1" in
-        OPENAI_API_KEY|ANTHROPIC_API_KEY|CLAUDE_CODE_OAUTH_TOKEN|AWS_SECRET_ACCESS_KEY|AWS_SESSION_TOKEN|GITHUB_READ_TOKEN|DB_PASS|JWT_VERIFICATION_KEY|PARALLEL_API_KEY|SLACK_BOT_TOKEN|SLACK_SIGNING_SECRET|MCP_CONNECT_SECRET|AGENTOS_MCP_SIGNING_KEY) return 0 ;;
+        OPENAI_API_KEY|ANTHROPIC_API_KEY|CLAUDE_CODE_OAUTH_TOKEN|AWS_SECRET_ACCESS_KEY|AWS_SESSION_TOKEN|GH_TOKEN|GITHUB_READ_TOKEN|DB_PASS|JWT_VERIFICATION_KEY|PARALLEL_API_KEY|SLACK_BOT_TOKEN|SLACK_SIGNING_SECRET|MCP_CONNECT_SECRET|AGENTOS_MCP_SIGNING_KEY) return 0 ;;
         *) return 1 ;;
     esac
 }
@@ -147,6 +147,7 @@ echo ""
 # as a single variable. OPENAI_API_KEY and DB_PASS keep their template slots;
 # everything else accumulates into the rendered extras.
 AGENTOS_URL_VALUE=""
+SANDBOX_PROVIDER_SET=""
 EXTRA_ENV=""
 EXTRA_SECRETS=""
 OPENAI_FROM_FILE=""
@@ -181,6 +182,8 @@ ${line}"
     current_value="${current_value%\"}"
     current_value="${current_value#\'}"
     current_value="${current_value%\'}"
+
+    if [[ "$current_key" == "SANDBOX_PROVIDER" ]]; then SANDBOX_PROVIDER_SET=1; fi
 
     case "$current_key" in
         AWS_PROFILE)
@@ -248,6 +251,11 @@ ${line}"
     current_key=""
     current_value=""
 done < "$ENV_FILE"
+
+# The task definition is replaced on every sync; retain the hosted backend default.
+if [[ -z "$SANDBOX_PROVIDER_SET" ]]; then
+    EXTRA_ENV=' , { "name": "SANDBOX_PROVIDER", "value": "agentcore" }'"${EXTRA_ENV}"
+fi
 
 if [[ $count -eq 0 ]]; then
     echo "Nothing to sync."

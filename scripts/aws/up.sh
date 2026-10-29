@@ -418,7 +418,7 @@ echo -e "${DIM}Secrets stored under agentos/*${NC}"
 PLACEHOLDER_URL="https://${SERVICE_NAME}.ecs.${REGION}.on.aws"
 AGENTOS_URL_VALUE="${AGENTOS_URL:-$PLACEHOLDER_URL}"
 
-EXTRA_ENV=""
+EXTRA_ENV=', { "name": "SANDBOX_PROVIDER", "value": "agentcore" }'
 [[ -n "$RUNTIME_ENV" ]] && EXTRA_ENV="${EXTRA_ENV}, { \"name\": \"RUNTIME_ENV\", \"value\": \"${RUNTIME_ENV}\" }"
 
 render_task_def() {
