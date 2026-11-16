@@ -54,26 +54,24 @@ See your repository's [deployment instructions](../README.md#deploy-in-productio
 
 ### Local Docker sandbox
 
-Configure `.env` using the [local setup instructions](../README.md#run-locally).
-From the repository root, build the sandbox image and start the platform:
+Configure `.env` using the [local setup instructions](../README.md#or-run-it-yourself).
+Uncomment the `/var/run/docker.sock` mount under `agentos-api.volumes` in
+`compose.yaml`. From the repository root, build the sandbox image and start the platform:
 
 ```sh
-echo 'COMPOSE_FILE=compose.yaml:compose.sandbox.yaml' >> .env
 docker build --target sandbox --load -t agno-sandbox:local .
 docker compose up -d --build
 ./scripts/mcp_check.sh
 ```
 
-`COMPOSE_FILE` adds [compose.sandbox.yaml](../compose.sandbox.yaml) to every
-`docker compose` command in this directory. It mounts your Docker daemon socket into
-the API. The build command builds and loads the Dockerfile's `sandbox` stage. The API
-runs in Compose and starts separate containers from that image for coding sessions.
+The first command builds and loads the Dockerfile's `sandbox` stage. The API runs in
+Compose and starts separate containers from that image for coding sessions.
 Rebuild the sandbox image when its dependencies or Dockerfile change.
 
-The socket gives the API, and a coding agent running without a sandbox, control of
-your Docker daemon. Use it only for trusted local development with sandboxes enabled;
-coding sandboxes receive no socket. Checkpoints persist
-in the project's `tmp/checkpoints` folder while those files remain.
+The enabled mount gives the API access to your Docker daemon through its socket. Use this for
+trusted local development; coding sandboxes receive no socket. Checkpoints persist
+in the project's `tmp/checkpoints` folder while those files remain. Comment the mount
+out again when disabling Docker sandboxes and run `docker compose up -d agentos-api`.
 
 Model credentials are forwarded automatically. For private repositories and publishing,
 configure [GitHub access](#publish-changes-to-github).
@@ -344,7 +342,7 @@ def create_repository_agents(slug: str, url: str, branch: str = "main"):
             sandbox=sandbox,
             repository=repository,
             system_prompt={"type": "preset", "preset": "claude_code"},
-            permission_mode="acceptEdits",
+            permission_mode="auto",
         ),
         CodexAgent(
             id=f"{slug}-codex",
@@ -354,6 +352,7 @@ def create_repository_agents(slug: str, url: str, branch: str = "main"):
             sandbox=sandbox,
             repository=repository,
             sandbox_mode="workspace-write",
+            approval_mode="auto_review",
         ),
     ]
 ```
